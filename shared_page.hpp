@@ -9,37 +9,17 @@
 
 /**
  * @file shared_page.hpp
- * @brief SG2002 大小核（C606L Linux ↔ C606 RTOS）共享页契约。
- *        Shared-page contract between the SG2002 big core (C606L Linux) and the
- *        C606 RTOS core.
+ * @brief SG2002 大小核共享页契约（平台中性，C606 直接用）。
+ *        SG2002 inter-core shared-page contract, platform neutral and used
+ *        directly by C606.
  *
- * 页是传输，Topic 是模块边界：本文件只有 POD 契约与发布索引原语，平台中性，
- * C606 侧直接使用（无 Topic、无适配层、无中断、无镜像）；Linux 侧的 Topic 适配
- * 在 `linux_shared_page.hpp`。
- *
- * A page is the transport; topics remain the module boundary. This header holds
- * only the POD contract and the publish-index primitives. It is platform
- * neutral and used directly by the C606 side (no topic, no adapter, no
- * interrupt, no mirror); the Linux-side topic adapter lives in
- * `linux_shared_page.hpp`.
- *
- * 设计要点，与 `docs/inter-core-protocol.md` 逐条对应：
- *
- * 1. **非缓存映射**消除 dcache clean/invalidate 维护；**acquire/release**消除
- *    访存次序问题。两者正交，都要（第 2、3 节）。
- * 2. **不新造同步范式**：`ring.head` / `region.seq` 与
- *    `libxr/src/structure/queue/spsc_queue_base.hpp` 的 head_/tail_ 逐条对应，
- *    只是共享页内的 POD 版本。
- * 3. **单位是硬件原生宽度**：IMU 为传感器原始 LSB、舵机为硬件命令字、tick 为
- *    rdtime 原始计数。换算只发生在本就要计算的一端（Linux 侧几何解算），满量程
- *    刻度属 action 仓库的 IMU 驱动配置，不焊进本契约。
- * 4. **契约无版本号**：定稿意味着双端同步变更，字段偏移由 `static_assert` 钉死。
- * 5. **命名空间是 `LibXR`**：本契约是 LibXR 生态里的一层传输（与 `LinuxSharedTopic`
- *    等同属 libxr 的既有设施），模块写 `LibXR::SharedPage` 即可，不另起一层只放几个
- *    类型的命名空间。
- * 5. **The namespace is `LibXR`**: this contract is one transport layer of the LibXR
- *    ecosystem, alongside facilities such as `LinuxSharedTopic`, so a consumer writes
- *    `LibXR::SharedPage` instead of a namespace holding a handful of types.
+ * 页是传输，Topic 是模块边界。本文件只有 POD 契约与发布索引原语，不含 Topic；Linux
+ * 侧的适配在 `linux_shared_page.hpp`。契约定稿见
+ * `bsp-guidance-vision/docs/inter-core-protocol.md`。
+ * A page is the transport and a topic is the module boundary. This file holds only
+ * the POD contract and the publish-index primitives, with no topic; the Linux-side
+ * adapter is `linux_shared_page.hpp`. The settled contract is documented in
+ * `bsp-guidance-vision/docs/inter-core-protocol.md`.
  */
 
 namespace LibXR
@@ -73,27 +53,25 @@ inline constexpr uint32_t ACCESS_UNIT_FORMAT_H264_ANNEX_B = 1;
  * @struct Sample
  * @brief 遥测记录：一次控制环采样。Telemetry record: one control-loop sample.
  *
- * 32B（8 对齐后正好 32B，末尾无额外补位）。单位规则见文件头第 3 条。
- * 32 bytes, exactly 32 with the 8-byte alignment (no trailing padding). See rule 3
- * above.
+ * 单位是硬件原生宽度：IMU 为原始 LSB、舵机为硬件命令字、tick 为 rdtime 计数。换算
+ * 只发生在本就要计算的一端（Linux 侧几何解算），满量程刻度属 action 仓库的 IMU
+ * 驱动配置。
+ * Units are hardware native: raw LSB for the IMU, hardware command words for the
+ * servos and rdtime counts for the tick. Conversion happens only where it is
+ * needed anyway (the Linux-side geometry solver) and the full-scale factors belong
+ * to the action repo's IMU driver configuration.
  *
- * 舵机通道数 = 4（第 8 节未决表定稿）。契约里的 `8`/`36B` 是旧格式残留：4 通道时
- * `servo_target` 8B 正好把 `pad` 顶到 28，结构体 32B。改通道数就是改这个数组长度，
- * 下面的 static_assert 会拦住漏改的一端。
- * Servo channel count is 4, as settled in the section 8 open-items table. The `8` and
- * `36B` still in the document's prose are leftovers of the old format: with four
- * channels `servo_target` is 8B, which puts `pad` at 28 and makes the struct 32B.
- * Changing the channel count means changing this array length, and the asserts below
- * stop one side from being changed alone.
+ * 舵机通道数取自契约定稿的 4，`static_assert` 钉住数组长度与由此得到的布局。
+ * The servo channel count is 4 as settled, and the static_asserts pin the array
+ * length and the layout that follows from it.
  */
 struct Sample
 {
   uint64_t ticks;  ///< C606 tick（rdtime，25MHz 域）。C606 tick (rdtime, 25 MHz domain).
-  int16_t accel[3];  ///< 加计原始 LSB（action 侧满量程刻度）。Raw accel LSB (full-scale
-                     ///< scale factor owned by the action repo).
-  int16_t gyro[3];   ///< 陀螺原始 LSB（同上）。Raw gyro LSB (same as above).
+  int16_t accel[3];          ///< 加计原始 LSB。Raw accel LSB.
+  int16_t gyro[3];           ///< 陀螺原始 LSB。Raw gyro LSB.
   uint16_t servo_target[4];  ///< 舵机硬件命令字（C606 解算输出）。Servo hardware command
-                             ///< words (solved on the C606 side).
+                             ///< words, solved on the C606 side.
   uint32_t pad;              ///< 填充到 8B 对齐。Padding to 8-byte alignment.
 };
 
@@ -105,20 +83,19 @@ static_assert(offsetof(Sample, pad) == 28, "Sample::pad offset pinned");
  * @struct TelemetryRing
  * @brief 遥测区：ring[64] + 发布索引。Telemetry region: ring[64] plus publish index.
  *
- * `head` 是**已发布条数**（单调递增，不回绕），物理槽位为 `head % 64`，
- * 所以「最新采样」= `ring[(head-1) % 64]`（`head == 0` 时无数据），区间语义为
- * 半开区间 `(last_seen, head]`。
- * `head` counts published samples (monotonic, never wraps) and the physical slot
- * is `head % 64`; therefore the latest sample is `ring[(head-1) % 64]` (no data
- * when `head == 0`) and a range is the half-open interval `(last_seen, head]`.
+ * `head` 是已发布条数（单调，不回绕），物理槽位为 `head % 64`；最新采样是
+ * `ring[(head-1) % 64]`（`head == 0` 时无数据），区间为半开区间 `(last_seen, head]`。
+ * `head` counts published samples (monotonic, never wraps) and the physical slot is
+ * `head % 64`; the latest sample is `ring[(head-1) % 64]` (none when `head == 0`) and
+ * a range is the half-open interval `(last_seen, head]`.
  */
 struct TelemetryRing
 {
   Sample ring[TELEMETRY_SLOTS];  ///< 定长历史，写者覆写最旧槽。Fixed history; the writer
                                  ///< overwrites the oldest slot.
-  std::atomic<uint32_t> head;    ///< 已发布条数（release store）。Published count
-                                 ///< (release store).
-  uint32_t reserved;             ///< 对齐与后续扩展留白。Alignment and future use.
+  std::atomic<uint32_t> head;  ///< 已发布条数（release store）。Published count (release
+                               ///< store).
+  uint32_t reserved;           ///< 对齐与后续扩展留白。Alignment and future use.
 };
 
 static_assert(sizeof(TelemetryRing) == sizeof(Sample) * TELEMETRY_SLOTS + 8,
@@ -171,29 +148,20 @@ struct RegionPayload
                       ///< x, normalised; ±1 is the camera field-of-view edge.
   float aim_y;        ///< 检测框中心 y（同上）。Detection-box centre y (same as above).
   uint8_t cmd;        ///< CMD_TRIGGER=1 / CMD_PARAM=2。Command code.
-  uint8_t pad2[3];    ///< 对齐留白：`uint16_t` 自然对齐到 16，`float` 到 20。
-                      ///< Alignment padding: `uint16_t` self-aligns to 16 and the
-                      ///< `float` follows at 20.
+  uint8_t pad2[3];    ///< 对齐留白。Alignment padding.
   uint16_t param_id;  ///< CMD_PARAM 的 C606 侧参数表索引。Parameter-table index on the
                       ///< C606 side for CMD_PARAM.
   float value;  ///< f32；≤2^24 整数精确，覆盖 u16 参数。f32; exact for integers up to
                 ///< 2^24, which covers u16 parameters.
 };
 
-// 定稿文档把偏移钉在 4 / 8 / 12 / 16 / 20，且 region 总长 32B、`seq` 落在 28。
-// 这里必须区分两件事：`RegionPayload` 本身是 24B（最后一个字段 `value` 结束于 24，
-// ABI 不会自动补尾），而契约要求它在页内占 28B、`seq` 紧随其后——也就是
-// `value` 之后有 4B 留白。那 4B 是 `Region` 的显式填充，不在 `RegionPayload` 里，
-// 因为把 payload 做成 28B 会让 `Region` 变成 36B，反而违反 `seq == 28`。
-// 两个数都必须钉住：双端若对尾部填充理解不同，`seq` 就会错位。
-// The settled document pins the offsets at 4 / 8 / 12 / 16 / 20, the region length
-// at 32B, and `seq` at 28. Two numbers must be kept apart: `RegionPayload` itself
-// is 24B (the last field ends at 24 and the ABI adds no tail padding), while the
-// contract reserves 28B for it in the page and puts `seq` right after, i.e. 4B of
-// slack follows `value`. That slack is explicit padding on `Region`, not inside
-// `RegionPayload`, because making the payload 28B would make `Region` 36B and
-// break `seq == 28`. Both numbers are pinned below: if the two cores disagree
-// about the tail padding, `seq` lands at the wrong byte.
+// 字段本身占 24B（`value` 结束于 24，ABI 不补尾）。页内为 payload 预留 28B，多出的
+// 4B 是 `Region` 的显式填充：把 payload 做成 28B 会让 `Region` 变成 36B、`seq` 落到
+// 32，反而违约。
+// The fields occupy 24B (the last one ends at 24 and the ABI adds no tail padding).
+// The page reserves 28B for the payload; the extra 4B is explicit padding on
+// `Region`, because padding the payload to 28B would make `Region` 36B and put `seq`
+// at 32.
 static_assert(sizeof(RegionPayload) == 24, "RegionPayload fields are 24B");
 static_assert(offsetof(RegionPayload, aim_x) == 4, "RegionPayload::aim_x offset pinned");
 static_assert(offsetof(RegionPayload, aim_y) == 8, "RegionPayload::aim_y offset pinned");
@@ -204,12 +172,17 @@ static_assert(offsetof(RegionPayload, value) == 20, "RegionPayload::value offset
 
 /**
  * @struct Region
- * @brief 参考/命令区：Linux 单写者。Reference/command region: single writer on Linux.
+ * @brief 参考/命令区：Linux 单写者。Reference/command region: a single writer on Linux.
+ *
+ * 写者写 payload 字段后 `seq + 1`（release）；读者读 `seq`（acquire）→ 拷 payload →
+ * 复读 `seq`，不一致则重试。
+ * The writer stores the payload fields and then bumps `seq` (release); the reader
+ * acquires `seq`, copies the payload, re-reads `seq` and retries on a mismatch.
  */
 struct Region
 {
-  RegionPayload payload;      ///< 有效载荷（24B 字段）。Payload (24B of fields).
-  uint32_t payload_pad;       ///< 尾部留白：把 `seq` 顶到 28。Trailing slack that puts
+  RegionPayload payload;      ///< 有效载荷。Payload.
+  uint32_t payload_pad;       ///< 尾部留白，把 `seq` 顶到 28。Trailing slack that puts
                               ///< `seq` at 28.
   std::atomic<uint32_t> seq;  ///< 发布索引：每次写 region +1。Publish index: +1 on every
                               ///< region write.
@@ -228,33 +201,27 @@ static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t),
 
 /**
  * @struct AccessUnit
- * @brief 相机访问单元槽（mailbox）：magic/CRC/借还语义从
- *        `camera_mailbox` 收进本契约，命名空间单例消失。
- *        Camera access-unit slot (mailbox): the magic/CRC/borrow semantics move
- *        from `camera_mailbox` into this contract and the namespace singleton
- *        disappears.
+ * @brief 相机访问单元槽（mailbox）：magic / CRC / 借还语义。
+ *        Camera access-unit slot (mailbox): magic, CRC and borrow semantics.
  *
- * 单内存槽的「最新帧」语义：写者填充 -> `seq` release +1 -> 读者 `seq` acquire
- * 比对（撕裂则重试）-> 读者拷走 payload 并置 `ready = 0`。读者慢时写者直接覆写
- * 旧帧（丢帧而不是阻塞），与 `keep-latest` 订阅一致。
- * Latest-frame semantics of a single memory slot: the writer fills the payload,
- * bumps `seq` (release); the reader acquires `seq` and re-reads it after copying
- * (retry when torn), then clears `ready`. A slow reader loses the old frame to
- * overwrite instead of blocking the writer, which matches a keep-latest
- * subscription.
+ * 单槽「最新帧」语义：写者填 payload 后 release 推 `seq`，读者比对 `seq` 后取走并清
+ * `ready`。读者慢时写者覆写旧帧而不是阻塞，与 keep-latest 订阅一致。
+ * Latest-frame semantics of a single slot: the writer fills the payload and releases
+ * `seq`, and the reader takes the frame once it matches and clears `ready`. A slow
+ * reader loses the old frame to an overwrite instead of blocking the writer, matching
+ * a keep-latest subscription.
  */
 struct AccessUnit
 {
   uint32_t magic;   ///< 必须为 `ACCESS_UNIT_MAGIC`。Must equal `ACCESS_UNIT_MAGIC`.
-  uint32_t format;  ///< 编码格式（0 = 未知，1 = H.264 Annex-B）。Pixel/encoding format.
+  uint32_t format;  ///< 编码格式，见下方枚举值。Encoding format; see the values below.
   uint32_t width;   ///< 帧宽。Frame width.
   uint32_t height;  ///< 帧高。Frame height.
-  std::atomic<uint32_t> seq;     ///< 内容序号（release store）。Content sequence (release
-                                 ///< store).
-  std::atomic<uint32_t> length;  ///< 有效字节数，≤ `MAILBOX_BYTES`。Valid byte count,
-                                 ///< no more than `MAILBOX_BYTES`.
-  std::atomic<uint32_t> ready;   ///< 1 = 有新帧可取；读者取走后置 0。1 = a new frame is
-                                 ///< available; the reader clears it after taking it.
+  std::atomic<uint32_t> seq;     ///< 内容序号（release store）。Content sequence.
+  std::atomic<uint32_t> length;  ///< 有效字节数，≤ `MAILBOX_BYTES`。Valid byte count, no
+                                 ///< more than `MAILBOX_BYTES`.
+  std::atomic<uint32_t> ready;   ///< 1 = 有新帧可取；读者取走后置 0。1 = a frame is
+                                 ///< available; cleared by the reader.
   std::atomic<uint32_t> crc32;   ///< payload CRC32（0 = 未校验）。CRC32 of the payload
                                  ///< (0 = unchecked).
   uint32_t reserved;             ///< 对齐与后续扩展留白。Alignment and future use.
@@ -300,15 +267,13 @@ static_assert(TelemetryOffset() + sizeof(TelemetryRing) <= RegionOffset(),
 
 /**
  * @class PageBase
- * @brief 一个页的基类：内存合法性校验与只读探测。
- *        Base class of one page: memory validation and read-only probing.
+ * @brief 页的基类：内存校验与只读探测。Base class of one page: validation and probing.
  *
- * 基类不拥有内存：页要么由 Linux 侧 `/dev/mem` 非缓存映射得来，要么由 C606 侧
- * 链接脚本分配。地址经 yaml 配置注入（Linux 侧），不进模块构造参数。
- * The base does not own the memory: a page is either mapped non-cached from
- * `/dev/mem` on Linux or allocated by the C606 linker script. The address is
- * injected through yaml configuration on the Linux side and is never a module
- * constructor argument.
+ * 不拥有内存：页由 Linux 侧 `/dev/mem` 非缓存映射，或由 C606 侧链接脚本分配。地址经
+ * yaml 配置注入，不进模块构造参数。
+ * Does not own the memory: a page is either mapped non-cached from `/dev/mem` on Linux
+ * or allocated by the C606 linker script, and the address is injected through yaml
+ * configuration rather than a module constructor argument.
  */
 class PageBase
 {
@@ -366,9 +331,8 @@ class PageBase
    * @brief 把一页格式化为本契约（清零 + 写 magic）。Format one page for this contract
    *        (clear, then stamp the magic).
    *
-   * 只在首次上电、或地址重新分配后执行；两侧都未写过数据时调用是幂等的。
-   * Run only on first power-up or after re-addressing; idempotent while neither
-   * side has written data yet.
+   * 只在首次上电或重新分配地址后执行。
+   * Run only on first power-up or after re-addressing.
    */
   void Format()
   {
@@ -385,11 +349,11 @@ class PageBase
 
   /**
    * @brief 清空遥测与参考区的发布索引（保留 magic）。
-   *        Clear the publish indices of the telemetry and reference regions
-   *        (keeps the magic).
+   *        Clear the publish indices of the telemetry and reference regions (keeps the
+   *        magic).
    *
-   * 合同双方重启后使用，避免读到上次运行的历史。Used after either side
-   * restarts so no history from the previous run is read.
+   * 任一侧重启后使用，避免读到上次运行的历史。
+   * Used after either side restarts so no history from the previous run is read.
    */
   void ClearHistory()
   {
@@ -424,12 +388,13 @@ class PageBase
 
 /**
  * @class Telemetry
- * @brief 遥测区的生产者视图（C606 控制环）。Producer view of the telemetry region
- *        (C606 control loop).
+ * @brief 遥测区的生产者视图（C606 控制环）。Producer view of the telemetry region (the
+ *        C606 control loop).
  *
- * 写入是「先 payload、后 head」的 release store；RVWMO 保证同 hart 的 store
- * 次序，无需 fence。Writing is payload-first, then a release store of `head`;
- * RVWMO guarantees same-hart store order, so no fence is required.
+ * 写入是「先 payload、后 head」的 release store：RVWMO 保证同 hart 的 store 次序，
+ * 无需 fence。
+ * Writing is payload first and then a release store of `head`: RVWMO guarantees
+ * same-hart store order, so no fence is needed.
  */
 class Telemetry
 {
@@ -508,24 +473,21 @@ class Telemetry
   /**
    * @brief 扫描 `(last_seen, head]` 区间。Scan the range `(last_seen, head]`.
    *
-   * 有界历史的固有竞态（唯一关不掉的）：读者落后 ≥ 64 槽时写者已覆写那些槽。
-   * 契约：仅解析 `head - last_seen ≤ 64` 的区间，超出整段丢弃并记 gap。
-   * The inherent race of a bounded history (the only one that cannot be closed):
-   * once the reader is 64 slots behind, the writer has already overwritten those
-   * slots. Contract: only parse a range with `head - last_seen <= 64`; drop the
-   * whole range and record a gap otherwise.
+   * 只解析 `head - last_seen <= 64` 的区间；读者落后更多时写者已覆写那些槽，整段丢弃
+   * 并返回 `RingScan::GAP`。
+   * Only a range with `head - last_seen <= 64` is parsed; further behind, the writer
+   * has already overwritten those slots, so the whole range is dropped with
+   * `RingScan::GAP`.
    *
-   * @param last_seen 读者上次消费到的条数（初值 0）。Count the reader consumed last
-   *                  (initial value 0).
+   * @param last_seen 读者上次消费到的条数（初值 0）。Count the reader consumed last.
    * @param scan 输出：区间结果。Output: range result.
-   * @param next 输出：下次调用应传入的 `last_seen`（已解析区间时为 `head`；gap/idle 时
-   *             为当前 `head`）。Output: the `last_seen` to pass on the next call
-   *             (`head` for a parsed range; the current `head` for gap/idle).
-   * @param samples 接收缓冲；可为 `nullptr`，此时只做区间与 gap 判定。Receive buffer; may
-   *                be `nullptr`, in which case only the range and gap decision is made.
+   * @param next 输出：下次调用应传入的 `last_seen`。Output: the `last_seen` for the next
+   *             call.
+   * @param samples 接收缓冲，可为 `nullptr`（只判定区间与 gap）。Receive buffer;
+   * `nullptr` only decides the range and the gap.
    * @param capacity `samples` 的槽数。Slot count of `samples`.
-   * @return 实际解析出的采样条数（`scan != RingScan::DATA` 时为 0）。Number of parsed
-   *         samples (0 when `scan != RingScan::DATA`).
+   * @return 解析出的采样条数；`scan != RingScan::DATA` 时为 0。Parsed sample count; 0
+   *         when `scan != RingScan::DATA`.
    */
   uint32_t Since(uint32_t last_seen, RingScan* scan, uint32_t* next, Sample* samples,
                  uint32_t capacity) const
@@ -552,13 +514,11 @@ class Telemetry
 
     const uint32_t count = head - last_seen;
 
-    // 边界：作者可能在区间判定与逐条拷贝之间继续推进，覆写我们正要读的最旧槽。
-    // 因此按「最新优先」倒序拷贝，先取 `head-1`，再取 `head-2`……离写者越远越晚读，
-    // 但最旧的那一条已经尽可能早地读到，撕裂窗口最小。
-    // Boundary: the writer may advance between the range decision and the copies,
-    // overwriting the oldest slots we are about to read. Copy newest-first
-    // (`head-1`, then `head-2`, ...) so the oldest sample of the range is read as
-    // early as possible, minimising the tear window.
+    // 写者可能在区间判定与拷贝之间继续推进并覆写最旧槽，所以按最新优先倒序拷贝，
+    // 让区间里最旧的一条尽早读到，撕裂窗口最小。
+    // The writer may advance between the range decision and the copies, overwriting the
+    // oldest slots, so the range is copied newest first to read its oldest sample as
+    // early as possible.
     const auto* ring = reinterpret_cast<const Sample*>(
         reinterpret_cast<const uint8_t*>(head_) - offsetof(TelemetryRing, head));
     if (samples != nullptr)
@@ -568,8 +528,8 @@ class Telemetry
       {
         samples[i] = ring[(head - 1 - i) % TELEMETRY_SLOTS];
       }
-      // 倒序读入后翻正，调用者拿到的是 `(last_seen, head]` 的正序序列。
-      // Reverse the newest-first copies so the caller sees `(last_seen, head]` in order.
+      // 倒序读入后翻正，调用者拿到正序区间。
+      // Reverse the newest-first copies so the caller sees the range in order.
       for (uint32_t i = 0, j = (limit == 0) ? 0 : limit - 1; i < j; ++i, --j)
       {
         const Sample tmp = samples[i];
@@ -584,12 +544,12 @@ class Telemetry
   }
 
   /**
-   * @brief 丢弃 `last_seen` 之前的全部历史，返回写者当前位置。
-   *        Drop all history older than `last_seen` and return the writer position.
+   * @brief 丢弃既往历史，返回写者当前位置。Drop past history and return the writer
+   *        position.
    *
-   * 订阅模式为 broadcast-drop-old 时使用（SD 慢时的丢最旧 + gap 策略）。
-   * Used by a broadcast-drop-old subscriber (the drop-oldest + gap policy when
-   * the SD card is slow).
+   * broadcast-drop-old 订阅模式使用（SD 慢时丢最旧 + gap）。
+   * Used by a broadcast-drop-old subscriber (drop oldest and mark a gap when the SD
+   * card is slow).
    */
   [[nodiscard]] uint32_t SeekToHead() const { return Head(); }
 
@@ -600,16 +560,13 @@ class Telemetry
 
 /**
  * @class Reference
- * @brief 参考/命令区的单写者视图（Linux 侧）。Single-writer view of the
- *        reference/command region (Linux side).
+ * @brief 参考/命令区的单写者视图（Linux 侧）。Single-writer view of the reference and
+ *        command region, used on the Linux side.
  *
- * 写者写 payload 字段后 `seq + 1`（release store）；读者读 `seq`（acquire）→
- * 拷 payload → 复读 `seq`，不一致则重试。acquire fence 不可省：RVWMO 允许
- * load-load 重排。
- * The writer stores the payload fields and then bumps `seq` (release). The
- * reader acquires `seq`, copies the payload, re-reads `seq`, and retries on a
- * mismatch. The acquire fence cannot be dropped: RVWMO permits load-load
- * reordering.
+ * 读者读 `seq`（acquire）→ 拷 payload → 复读 `seq`，不一致则重试；acquire 不可省，
+ * RVWMO 允许 load-load 重排。
+ * The reader acquires `seq`, copies the payload, re-reads `seq` and retries on a
+ * mismatch. The acquire cannot be dropped: RVWMO permits load-load reordering.
  */
 class Reference
 {
@@ -632,17 +589,11 @@ class Reference
   /**
    * @brief 读一个自洽的 region 快照。Read one coherent region snapshot.
    *
-   * 读侧（C606 控制环）是「一次 load，无适配层」；本函数只在该次 load 可能撕裂时
-   * 重试，正常路径就是两条 acquire load 加一次拷贝。
-   * The read side (C606 control loop) is a single load with no adapter; this
-   * function retries only when that load may be torn. The normal path is two
-   * acquire loads plus one copy.
-   *
-   * 输出的 `Region` 是调用者持有的快照，其 `seq` 是普通值而非页内发布索引：
-   * `Region` 含原子成员，拷贝赋值被删除，所以这里逐字段填充而不是整体赋值。
-   * The returned `Region` is a caller-owned snapshot whose `seq` is a plain value
-   * rather than the in-page publish index: `Region` holds an atomic member, so its
-   * copy assignment is deleted and the fields are filled in one by one instead.
+   * 正常情况下是两条 acquire load 加一次拷贝；只有该次读可能撕裂时才重试。输出的
+   * `Region` 是调用者持有的快照，其 `seq` 为普通值而非页内发布索引。
+   * The normal path is two acquire loads plus one copy, retrying only when the read may
+   * be torn. The returned `Region` is a caller-owned snapshot whose `seq` is a plain
+   * value rather than the in-page publish index.
    *
    * @param out 输出：region 快照。Output: region snapshot.
    * @param retries 撕裂重试上限。Tear-retry limit.
@@ -665,11 +616,9 @@ class Reference
       }
     }
 
-    // 重试上限内没读到自洽快照（写者持续发布）：返回最后一次拷贝并标记 BUSY，
-    // 让调用者决定是再用一帧旧值还是跳过本周期。
+    // 重试上限内未读到自洽快照（写者持续发布）：返回最后一次拷贝并标记 BUSY。
     // No coherent snapshot within the retry budget (the writer keeps publishing):
-    // return the last copy tagged BUSY so the caller can decide between using a
-    // stale value and skipping the cycle.
+    // return the last copy tagged BUSY.
     out->payload = region_->payload;
     out->seq.store(region_->seq.load(std::memory_order_acquire),
                    std::memory_order_relaxed);
@@ -677,8 +626,7 @@ class Reference
   }
 
   /**
-   * @brief 只读当前发布索引（用于「有没有新参考」判定）。Read only the current publish
-   *        index (used to tell whether a new reference arrived).
+   * @brief 只读当前发布索引。Read only the current publish index.
    */
   [[nodiscard]] uint32_t Seq() const
   {
@@ -686,14 +634,12 @@ class Reference
   }
 
   /**
-   * @brief 写一个 region（payload + `seq + 1`）。Write one region (payload, then
-   *        `seq + 1`).
+   * @brief 写一个 region（先 payload，后 `seq + 1`）。
+   *        Write one region: the payload first, then `seq + 1`.
    *
-   * Linux 每帧写一次（found/aim）；Razver POLL 回传的命令经大核白名单过滤后同样走
-   * 这里。名称对应文档中的 `page.Region()`：取回的是本视图对象，不是一份拷贝。
-   * Linux writes once per frame (found/aim); commands returned by the Razver POLL
-   * path go through the same call after whitelist filtering on the big core. This
-   * is the documented `page.Region()`: it returns the view object, not a copy.
+   * Linux 每帧写一次（found/aim）；Razver POLL 回传的命令越过白名单后同样走这里。
+   * Linux writes once per frame (found/aim); a command returned by the Razver POLL path
+   * goes through the same call once it passes the whitelist.
    *
    * @param payload 待写 payload。Payload to write.
    * @return 写入后的 `seq`。The resulting `seq`.
@@ -724,9 +670,8 @@ class Reference
   }
 
   /**
-   * @brief 直接取页内 region 指针（C606 侧热路径直读用）。
-   *        Get the in-page region pointer directly (for the C606 hot path that
-   *        reads it in place).
+   * @brief 直接取页内 region 指针（C606 侧热路径直读）。Get the in-page region pointer
+   *        for the C606 hot path that reads it in place.
    */
   [[nodiscard]] const Region* Raw() const { return region_; }
 
@@ -739,11 +684,9 @@ class Reference
  * @brief 一个已映射页的完整视图：遥测 + 参考。Complete view of one mapped page:
  *        telemetry plus reference.
  *
- * C606 侧控制环直接使用，没有 Topic、没有适配层：`WriteSample()` 写 ring 并推
- * `head`，`Region()` 取参考。Linux 侧由 `LinuxSharedPage` 把这个页包成 Topic。
- * The C606 control loop uses this directly, with no topic and no adapter:
- * `WriteSample()` writes the ring and pushes `head`, `Region()` yields the
- * reference. On the Linux side `LinuxSharedPage` wraps the page into a topic.
+ * C606 侧控制环直接使用；Linux 侧由 `LinuxSharedPage` 把这个页包成 Topic。
+ * Used directly by the C606 control loop; on the Linux side `LinuxSharedPage` wraps
+ * the page into a topic.
  */
 class SharedPage : public PageBase
 {
@@ -813,20 +756,12 @@ class SharedPage : public PageBase
 /**
  * @class AccessUnitPage
  * @brief 独立的访问单元页（相机 mailbox），与遥测/参考页分开映射。
- *        Separate access-unit page (camera mailbox), mapped apart from the
+ *        Separate access-unit page (the camera mailbox), mapped apart from the
  *        telemetry/reference page.
  *
- * `camera_mailbox` 的 magic/CRC/借还语义收进这里：命名空间单例消失，Linux 侧改
- * 为按 `"access_unit"` 订阅 topic（与 `ICM42688` 的 topic 做法同风格）。
- * The magic/CRC/borrow semantics of `camera_mailbox` live here: the namespace
- * singleton disappears and the Linux side subscribes to the `"access_unit"`
- * topic instead, in the same style as the other LibXR topics.
- *
- * 构造与 `Format()` 只写页内的非 payload 头部，不清 payload 区：512 KiB 的 payload
- * 区清零在页首次映射时做一次即可，重启路径上没必要付这个代价。
- * Construction and `Format()` touch only the non-payload header: the 512 KiB
- * payload area is cleared once when the page is first mapped, and the restart
- * path does not need to pay that cost again.
+ * 只写页内的头部字段，不清 512 KiB 的 payload 区：那一次清零在页首次映射时做即可。
+ * Only the header fields are written; the 512 KiB payload area is cleared once when
+ * the page is first mapped.
  */
 class AccessUnitPage : public PageBase
 {
@@ -898,17 +833,18 @@ class AccessUnitPage : public PageBase
 
   /**
    * @brief 发布一帧访问单元（相机侧，持有 VENC buffer 时调用）。
-   *        Publish one access unit (camera side, while holding the VENC buffer).
+   *        Publish one access unit, called on the camera side while the VENC buffer is
+   *        held.
    *
    * @param data 访问单元字节。Access-unit bytes.
-   * @param length 字节数，必须 ≤ `MAILBOX_BYTES`。Byte count; must not exceed
+   * @param length 字节数，不超过 `MAILBOX_BYTES`。Byte count, no more than
    *               `MAILBOX_BYTES`.
    * @param format 编码格式。Encoding format.
    * @param width 帧宽。Frame width.
    * @param height 帧高。Frame height.
-   * @param crc32 payload CRC32；0 表示不校验。Payload CRC32; 0 disables checking.
-   * @return 写入后的 `seq`；`data == nullptr` 或不绑定时为 0。The resulting `seq`; 0 when
-   *         `data == nullptr` or the page is unbound.
+   * @param crc32 payload CRC32，0 表示不校验。Payload CRC32; 0 means unchecked.
+   * @return 写入后的 `seq`；越界、空指针或未绑定时为 0。The resulting `seq`; 0 when
+   *         oversized, null or unbound.
    */
   uint32_t Publish(const void* data, uint32_t length, uint32_t format, uint32_t width,
                    uint32_t height, uint32_t crc32 = 0)
@@ -936,20 +872,19 @@ class AccessUnitPage : public PageBase
 
   /**
    * @brief 取一帧访问单元（Linux 侧，`camera_mailbox` 借还语义）。
-   *        Take one access unit (Linux side; the `camera_mailbox` borrow
-   *        semantics).
+   *        Take one access unit on the Linux side, with the `camera_mailbox` borrow
+   *        semantics.
    *
-   * 取到后调用者应立刻消费（拷贝/编码）；`ready` 已清 0，写者下次覆盖不会与本次
-   * 读取竞争。返回的指针直接指向非缓存页内，保持到下次 `Publish()` 之前有效。
-   * After a successful take the caller should consume the frame at once (copy or
-   * encode); `ready` is already cleared, so the next overwrite does not race this
-   * read. The returned pointer points straight into the non-cached page and stays
-   * valid until the next `Publish()`.
+   * 返回的指针直接指向非缓存页内，保持到下次 `Publish()` 之前；取走后 `ready` 已清 0，
+   * 调用者应尽快消费（拷贝或编码）。
+   * The pointer points straight into the non-cached page and stays valid until the next
+   * `Publish()`; `ready` is already cleared, so the caller should consume the frame
+   * promptly (copy or encode).
    *
    * @param crc32 输出：本帧 payload CRC32。Output: payload CRC32 of this frame.
    * @param retries 撕裂重试上限。Tear-retry limit.
-   * @return 未绑定或页为空返回空视图；否则返回本帧的只读视图。An empty view when
-   *         unbound or no frame; otherwise the read-only view of this frame.
+   * @return 未绑定、无新帧或撕裂未消除时返回空视图。An empty view when unbound, no frame
+   *         is ready, or a tear could not be resolved.
    */
   [[nodiscard]] View Acquire(uint32_t* crc32 = nullptr, uint32_t retries = 8)
   {
@@ -1002,11 +937,9 @@ class AccessUnitPage : public PageBase
 };
 
 /**
- * @brief 逐字节校验一帧访问单元（可选，用于调试链路）。
- *        Byte-wise validation helper for one access unit (optional; for link
- *        debugging).
- *
- * @return magic 与长度合法返回 `true`。`true` when the magic and the length are valid.
+ * @brief 校验访问单元页是否已格式化。Validate that an access-unit page is formatted.
+ * @param page 待校验的页。Page to validate.
+ * @return 已格式化返回 `true`。`true` when formatted.
  */
 inline bool CheckAccessUnitPage(const AccessUnitPage& page)
 {

@@ -21,9 +21,10 @@
  * not depend on wall time.
  */
 
+#include <sys/mman.h>
+
 #include <array>
 #include <cstring>
-#include <sys/mman.h>
 
 #include "linux_shared_page.hpp"
 #include "sample.hpp"
@@ -64,8 +65,9 @@ class Mapping
 {
  public:
   explicit Mapping(size_t bytes)
-      : bytes_(bytes), data_(::mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
-                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0))
+      : bytes_(bytes),
+        data_(::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+                     -1, 0))
   {
     TEST_ASSERT(data_ != MAP_FAILED);
   }
@@ -92,7 +94,8 @@ int main()
   TEST_ASSERT(page.Ready());
 
   LibXR::Topic::Domain domain(SHARED_PAGE_DOMAIN_NAME);
-  LibXR::Topic topic(LibXR::Topic::FindOrCreate<TelemetryBatch>(TELEMETRY_TOPIC_NAME, &domain));
+  LibXR::Topic topic(
+      LibXR::Topic::FindOrCreate<TelemetryBatch>(TELEMETRY_TOPIC_NAME, &domain));
   BatchCapture capture;
   auto callback = LibXR::Topic::Callback::Create(OnBatch, &capture);
   topic.RegisterCallback(callback);

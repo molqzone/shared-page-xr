@@ -24,9 +24,10 @@
  * path is covered by forging the intermediate state a torn read observes.
  */
 
+#include <sys/mman.h>
+
 #include <array>
 #include <cstring>
-#include <sys/mman.h>
 #include <type_traits>
 #include <vector>
 
@@ -59,8 +60,9 @@ class Mapping
 {
  public:
   explicit Mapping(size_t bytes)
-      : bytes_(bytes), data_(::mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
-                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0))
+      : bytes_(bytes),
+        data_(::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS,
+                     -1, 0))
   {
     TEST_ASSERT(data_ != MAP_FAILED);
   }
@@ -111,7 +113,7 @@ void TestLayout()
   // 发布索引必须是页内一个可原子访问的 4B 计数。
   // The publish index must be one atomically accessible 4B counter in the page.
   TEST_ASSERT((std::is_same_v<decltype(std::declval<TelemetryRing&>().head),
-                             std::atomic<uint32_t>>));
+                              std::atomic<uint32_t>>));
   TEST_ASSERT(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t));
   TEST_ASSERT(std::atomic<uint32_t>::is_always_lock_free);
 }
@@ -182,7 +184,8 @@ void TestLatest(const Mapping& mapping)
   TEST_ASSERT(page.Latest(&latest));
   TEST_ASSERT(SameSample(latest, MakeSample(2)));
 
-  const auto* ring = reinterpret_cast<const TelemetryRing*>(mapping.Data() + TelemetryOffset());
+  const auto* ring =
+      reinterpret_cast<const TelemetryRing*>(mapping.Data() + TelemetryOffset());
   TEST_ASSERT(SameSample(ring->ring[2], MakeSample(2)));
   TEST_ASSERT(SameSample(ring->ring[0], MakeSample(0)));
 }
@@ -247,7 +250,8 @@ void TestSince(const Mapping& mapping)
   writer.Write(MakeSample(66));
   TEST_ASSERT(reader.Since(66, &scan, &next, out.data(), out.size()) == 1);
   TEST_ASSERT(SameSample(out[0], MakeSample(66)));
-  const auto* ring = reinterpret_cast<const TelemetryRing*>(mapping.Data() + TelemetryOffset());
+  const auto* ring =
+      reinterpret_cast<const TelemetryRing*>(mapping.Data() + TelemetryOffset());
   TEST_ASSERT(SameSample(ring->ring[2], MakeSample(66)));
 
   // 接收缓冲为 nullptr 时只回答区间/gap 问题。
@@ -365,7 +369,8 @@ void TestAccessUnit()
   // 写者覆写而不阻塞；读者拿到新的 seq。
   // The writer overwrites rather than blocking and the reader sees the new seq.
   frame[0] = 0xAB;
-  TEST_ASSERT(mailbox.Publish(frame.data(), 16, AccessUnit::FORMAT_H264_ANNEX_B, 320, 240) == 2);
+  TEST_ASSERT(
+      mailbox.Publish(frame.data(), 16, AccessUnit::FORMAT_H264_ANNEX_B, 320, 240) == 2);
   const auto second = mailbox.Acquire();
   TEST_ASSERT(second.Valid());
   TEST_ASSERT(second.seq == 2);

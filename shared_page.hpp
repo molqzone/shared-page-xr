@@ -936,14 +936,4 @@ class AccessUnitPage : public PageBase
   }
 };
 
-/**
- * @brief 校验访问单元页是否已格式化。Validate that an access-unit page is formatted.
- * @param page 待校验的页。Page to validate.
- * @return 已格式化返回 `true`。`true` when formatted.
- */
-inline bool CheckAccessUnitPage(const AccessUnitPage& page)
-{
-  return page.Check() == PageMagicKind::FORMATTED;
-}
-
 }  // namespace LibXR

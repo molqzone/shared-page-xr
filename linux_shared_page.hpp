@@ -251,21 +251,10 @@ class LinuxSharedPage
   }
 
   /**
-   * @brief 当前遥测发布索引（`head`）。Current telemetry publish index (`head`).
-   */
-  [[nodiscard]] uint32_t TelemetryHead() const { return page_.TelemetryReader().Head(); }
-
-  /**
-   * @brief 本适配器已消费到的发布索引（相当于订阅者的 `last_seen`）。
-   *        Publish index this adapter has consumed (the subscriber-side
-   *        `last_seen`).
+   * @brief 本适配器已消费到的发布索引（订阅者的 `last_seen`）。Publish index this adapter
+   *        has consumed, the subscriber-side `last_seen`.
    */
   [[nodiscard]] uint32_t LastSeen() const { return last_seen_; }
-
-  /**
-   * @brief 页视图。The page view.
-   */
-  [[nodiscard]] SharedPage& Page() { return page_; }
 
  private:
   SharedPage page_;             ///< 已映射的页。Already-mapped page.

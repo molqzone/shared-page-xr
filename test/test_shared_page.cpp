@@ -337,7 +337,6 @@ void TestAccessUnit()
   TEST_ASSERT(mailbox.Check() == PageMagicKind::UNFORMATTED);
   mailbox.Format();
   TEST_ASSERT(mailbox.Check() == PageMagicKind::FORMATTED);
-  TEST_ASSERT(CheckAccessUnitPage(mailbox));
 
   uint32_t crc = 0;
   TEST_ASSERT(!mailbox.Acquire(&crc).Valid());

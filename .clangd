@@ -1,5 +1,5 @@
 CompileFlags:
-  CompilationDatabase: ../../build-host
+  CompilationDatabase: ../build
 
 Diagnostics:
   ClangTidy:
@@ -53,6 +53,9 @@ Diagnostics:
       modernize-loop-convert.MinConfidence: risky
       readability-identifier-naming.VariableCase: lower_case
       readability-identifier-naming.GlobalVariableCase: lower_case
+      readability-identifier-naming.GlobalConstantCase: lower_case
+      readability-identifier-naming.LocalConstantCase: lower_case
+      readability-identifier-naming.ConstexprVariableCase: UPPER_CASE
       readability-identifier-naming.ClassMemberCase: lower_case
       readability-identifier-naming.ClassMemberSuffix: _
       readability-identifier-naming.PrivateMemberCase: lower_case

@@ -1,7 +1,7 @@
 # shared-page-xr
 
-SG2002 大小核（C606L Linux ↔ C606 RTOS）共享页传输。页是传输，Topic 仍是模块边界：
-契约本身平台中性（C606 直接用），Linux 侧的 Topic 适配只依赖 LibXR 的 `Topic`。
+SG2002 大小核（C606L Linux ↔ C606 RTOS）共享页传输。`SharedPage` 继承 LibXR 的
+`Topic`，模块直接以 Topic 作为边界；Linux 侧扩展负责 drain。
 
 本仓库是 `bsp-guidance-vision` / action 仓库的 submodule（两仓同 URL 同 pin，对齐
 `libcvimpp` 的做法），**不是 xrobot Module**：没有 MANIFEST、不进 `User/xrobot.yaml`、
@@ -12,31 +12,28 @@ SG2002 大小核（C606L Linux ↔ C606 RTOS）共享页传输。页是传输，
 ## 组成
 
 ```text
-shared_page.hpp / .cpp        页契约（Sample / Region / AccessUnit）+ 发布索引 +
+shared_page.hpp / .cpp        SharedPage : Topic；页契约（Sample / Region / AccessUnit）+
                               Latest() / Since() / Region() / Acquire()。
                               C606 控制环直接用
-linux_shared_page.hpp / .cpp  LinuxSharedPage：drain 遥测区间 → Topic 广播；写参考区
+linux_shared_page.hpp / .cpp  LinuxSharedPage : SharedPage：/dev/mem 映射 + drain → Topic
 CMakeLists.txt                STATIC target shared_page_xr，链接 libxr，无平台分支
 ```
 
-声明与实现分开（与 libxr 的 `topic.hpp` / `topic.cpp` 同一做法）：`.hpp` 只有 POD 契约、
-`static_assert` 与类声明，`linux_shared_page.cpp` 里才出现 `Topic` / `Timebase` 的实现细节。
-好处不只是整洁——`.hpp` 因此不再间接拉进 `crc.hpp` 及其 `<cstdio>`，C606 侧只编译契约。
+声明与实现分开：`.hpp` 保留契约与类声明，实现放在 `.cpp`。
 
 两侧的代码形状各自最自然：
 
 ```cpp
-// C606 侧控制环：SharedPage 直接用，没有 Topic，没有适配层
+// C606 侧控制环：SharedPage 直接用
 auto& page = /* 链接脚本分配的 SharedPage */;
 page.WriteSample(sample);                  // 写 ring + 推 head
 Region region = {};
-if (page.Region().Read(&region) == RegionScan::CURRENT) { /* 用 region.payload */ }
+if (page.Region().Read(&region) == ErrorCode::OK) { /* 用 region.payload */ }
 
-// Linux 侧（RazverMaster / Recorder）：订 topic，与 camera_image 同构
-SharedPage page(/* yaml 配置注入的 /dev/mem 非缓存映射 */);
-LibXR::Topic topic(LibXR::Topic::CreateTopic<TelemetryBatch>("telemetry"));
-LibXR::LinuxSharedPage adapter(page, topic);
-adapter.Poll();                            // 1kHz：drain 新区间并发一组
+// Linux 侧（RazverMaster / Recorder）：LinuxSharedPage owns the /dev/mem mapping
+LibXR::LinuxSharedPage page(/* shared-page physical address */, "telemetry", 1000);
+LibXR::Topic& telemetry = page;      // module boundary
+page.Poll();                         // 1kHz：drain 新区间并发一组
 ```
 
 ## 页布局（4 KiB，两侧均非缓存映射）
@@ -45,49 +42,50 @@ adapter.Poll();                            // 1kHz：drain 新区间并发一组
 |---|---|
 | `0` | `PageHeader`：`magic = "SharedP1"`、`page_size = 4096` |
 | `8` | `TelemetryRing`：`Sample ring[64]`（2560B）+ `head` + 留白 |
-| `4064` | `Region`：`RegionPayload`（24B 字段）+ 4B 留白 + `seq` |
+| `4064` | `Region`：24B 高层 payload 字节 + 4B 状态 + `seq` |
 
 `head` 是**已发布条数**（单调，不回绕）；物理槽位 `head % 64`；最新采样
 `ring[(head-1) % 64]`；区间是半开区间 `(last_seen, head]`；`head - last_seen > 64`
 时整段丢弃并记 gap（有界历史的固有竞态，详见契约第 3 节）。
 
-`Sample` 36B（8 对齐后 40B），单位是**硬件原生宽度**：IMU 为传感器原始 LSB、舵机为
+`Sample` 32B，单位是**硬件原生宽度**：IMU 为传感器原始 LSB、舵机为
 硬件命令字、tick 为 `rdtime` 原始计数。满量程刻度属 action 仓库的 IMU 驱动配置，
 不焊进本契约。
 
-`Region` 的 4B 尾部留白是契约的一部分：`seq` 必须落在 28，而 `RegionPayload` 的字段
-只占 24B（最后一个 `float` 结束于 24，ABI 不补尾）。把 payload 直接做成 28B 会让
-`Region` 变成 36B、`seq` 落到 32，反而违约。
+`Region` 的 payload 固定为 24B，具体字段由高层定义；状态与 `seq` 把 `Region` 固定为
+32B，`seq` 位于 28。
 
 ## 同步原语
 
-与 `libxr/src/structure/queue/spsc_queue_base.hpp` 的 `head_`/`tail_` 逐条对应，
-不新造范式：写者先写 payload 字段、再 `head + 1`（release store）；读者读 `head`
-（acquire）→ 拷 payload → 复读比对，不一致重试。非缓存映射消除 cache 维护，
-acquire/release 消除访存次序问题，两者正交，都要。
+与 `libxr/src/structure/queue/spsc_queue_base.hpp` 的 `head_`/`tail_` 一样使用
+acquire/release；padding 中的写入状态覆盖 payload 的同步窗口。读者检查状态和索引，
+拷贝后复读，变化就重试。非缓存映射消除 cache 维护，acquire/release 消除访存次序
+问题，两者正交。
 
-不需要锁、奇偶 seqlock、futex、描述符队列，也不需要 dcache clean/invalidate。
+不需要 futex、描述符队列或异步状态机，也不需要 dcache clean/invalidate。
 
 ## 访问单元页（独立映射）
 
-遥测/参考页之外还有一页 `AccessUnitPage`：单槽「最新帧」语义，magic/CRC/借还语义
+遥测/参考页之外还有一页 `AccessUnitPage`：单槽「最新帧」语义，magic/seq/借还语义
 从 `camera_mailbox` 收进契约，命名空间单例消失。`Publish()` 填 payload 后 release
 bump `seq`；`Acquire()` acquire 比对后返回只读视图并清 `ready`，读者慢时写者直接
 覆写旧帧（丢帧而不阻塞），与 keep-latest 订阅一致。Linux 侧的自留缓冲区按此发布，
 C606 侧用 `Acquire()` 取。
 
-CRC32 用 libxr 既有的 `LibXR::CRC32`（`libxr/src/utils/crc.hpp`），不在契约里另写一份
-校验算法：`Publish()` 自己算出校验值写进页内（`compute_crc32 = false` 可关闭，那是
-一次整帧扫描），`Acquire(true)` 复算比对，不匹配时返回空视图并保留 `ready` 供重试。
-两端共用同一实现，双核才会对同一个字节流得到同一个值。
+**契约没有 CRC**：旧 `camera_mailbox` 的 CRC32 承担的两个职责——覆写中的撕裂读、
+旧进程遗留的脏帧——在本契约里分别由 `seq` 双重读（比对 4B 索引，不是扫 512KB）和
+启动语义（页 magic + `ClearHistory()` + `last_seen > head` 判 gap）覆盖，且它连自己
+名义上的用例都没覆盖：View 是页内零拷贝指针，持有期间写者覆写会连 CRC 字段一起改写，
+没有任何人会在持有期间复检。两核直写直读共享 DDR 没有引入比特翻转的搬运环节，
+位翻转也不该由这一层用整帧扫描兜。H.264 自身有容错，丢帧归上层。
 
 ## 约束
 
 * `static_assert` 把字段偏移与总长钉死。**契约无版本号**：变更双端同步，加字段永远
   是廉价操作，改已有字段偏移不是。
 * 页地址不进模块构造参数：Linux 侧经 yaml 配置注入，C606 侧由链接脚本分配。
-* `linux_shared_page.hpp` 是唯一依赖 LibXR `Topic` 的部分；`shared_page.hpp` 只依赖
-  `libxr_def.hpp` 的 `ASSERT`，C606 侧可单独使用。两者都需要编译本仓库的 `.cpp`。
+* `SharedPage` 继承 LibXR `Topic`；`LinuxSharedPage` 映射 Linux 物理页并发布 typed topic。
+  两者都需要编译本仓库的 `.cpp`。
 
 ## 测试
 
@@ -126,11 +124,10 @@ ctest --test-dir build-host -R "shared_page|linux_shared_page" --output-on-failu
 `test_shared_page.cpp`：布局与发布索引——`Sample`/`Region` 的字段偏移与总长、`Latest` /
 `Since` 的边界（64 槽余量、gap、新纪元）、region 稳定读与撕裂重试、访问单元页的借还
 语义。`test_linux_shared_page.cpp`：驱动真实 LibXR `Topic`——节律门、一组遥测进回调
-订阅者、gap 后重新同步、参考/命令经独立页视图回读。
+订阅者、gap 后重新同步、以及由高层 payload 写入的参考区回读。
 
 ### 已知待办
 
 `libxr` 尚未作为本仓库的 submodule pin 住（`.gitmodules` 里没有它），所以「单独构建
 本仓库」目前要求旁边已有一份 libxr，或在 `bsp-guidance-vision` 里构建。补上后单独
 `git clone --recursive` 即可自带测试依赖。
-

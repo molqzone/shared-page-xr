@@ -41,21 +41,24 @@ inline LibXR::Sample MakeSample(uint32_t index)
   sample.gyro[0] = static_cast<int16_t>(-static_cast<int16_t>(index));
   sample.gyro[1] = static_cast<int16_t>(200 + index);
   sample.gyro[2] = -400;
+  sample.temperature = static_cast<int16_t>(-500 + static_cast<int16_t>(index));
   for (uint32_t channel = 0; channel < SERVO_CHANNELS; ++channel)
   {
     sample.servo_target[channel] =
         static_cast<uint16_t>(index * SERVO_CHANNELS + channel);
+    sample.servo_actual[channel] =
+        static_cast<uint16_t>(index * SERVO_CHANNELS + channel + 5000);
   }
-  sample.pad = 0xDEADBEEFU;
+  sample.pad = 0xBEEFU;
   return sample;
 }
 
 /**
  * @brief 逐字节比较两条采样。Compare two samples byte for byte.
  *
- * 用 `memcmp` 而不是逐字段比较：结构体的 4B 尾部留白也是契约的一部分，逐字段比较会
+ * 用 `memcmp` 而不是逐字段比较：结构体的 2B 尾部留白也是契约的一部分，逐字段比较会
  * 漏掉它。
- * Uses `memcmp` rather than field-by-field comparison: the struct's 4B tail padding is
+ * Uses `memcmp` rather than field-by-field comparison: the struct's 2B tail padding is
  * part of the contract and a field-wise check would miss it.
  */
 inline bool SameSample(const LibXR::Sample& lhs, const LibXR::Sample& rhs)

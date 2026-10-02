@@ -3,7 +3,7 @@
  * @brief `shared_page.hpp` 的契约测试 / Contract tests for `shared_page.hpp`.
  *
  * 测什么 / Checks:
- *   1. 双端编译依赖的数字：Sample / RegionPayload / Region / TelemetryRing 的字段
+ *   1. 双端编译依赖的数字：Sample / Region / TelemetryRing 的字段
  *      偏移与总长，以及页内各区偏移。
  *   2. 发布索引：`head` 计数、物理槽位 `head % 64`、最新为 `ring[(head-1) % 64]`。
  *   3. `Since()` 的区间语义：追平、上界 64 槽、gap、新纪元（head 回退）。
@@ -31,7 +31,6 @@
 #include <type_traits>
 #include <vector>
 
-#include "crc.hpp"
 #include "sample.hpp"
 #include "shared_page.hpp"
 #include "test_assert.hpp"
@@ -43,9 +42,23 @@ using LibXRTest::SameSample;
 namespace
 {
 
-constexpr uint32_t kSampleBytes = 32;
-constexpr uint32_t kRegionBytes = 32;
-constexpr uint32_t kTelemetryBytes = kSampleBytes * TELEMETRY_SLOTS;
+constexpr uint32_t SAMPLE_BYTES = 40;
+constexpr uint32_t REGION_BYTES = 32;
+constexpr uint32_t TELEMETRY_BYTES = SAMPLE_BYTES * TELEMETRY_SLOTS;
+
+struct TestProtocolPayload
+{
+  uint8_t found = 0;
+  uint8_t pad[3] = {};
+  float aim_x = 0;
+  float aim_y = 0;
+  uint8_t cmd = 0;
+  uint8_t pad2[3] = {};
+  uint16_t param_id = 0;
+  float value = 0;
+};
+
+static_assert(sizeof(TestProtocolPayload) == REGION_PAYLOAD_BYTES);
 
 /// 读出一个结构体占用的字节，用于伪造外来页。Read a struct's bytes to forge a page.
 template <typename T>
@@ -83,33 +96,26 @@ class Mapping
 /// 1. 双端编译依赖的数字。The numbers both cores compile against.
 void TestLayout()
 {
-  TEST_ASSERT(sizeof(Sample) == kSampleBytes);
+  TEST_ASSERT(sizeof(Sample) == SAMPLE_BYTES);
   TEST_ASSERT(offsetof(Sample, ticks) == 0);
   TEST_ASSERT(offsetof(Sample, accel) == 8);
   TEST_ASSERT(offsetof(Sample, gyro) == 14);
-  TEST_ASSERT(offsetof(Sample, servo_target) == 20);
-  TEST_ASSERT(offsetof(Sample, pad) == 28);
+  TEST_ASSERT(offsetof(Sample, temperature) == 20);
+  TEST_ASSERT(offsetof(Sample, servo_target) == 22);
+  TEST_ASSERT(offsetof(Sample, servo_actual) == 30);
+  TEST_ASSERT(offsetof(Sample, pad) == 38);
   TEST_ASSERT(sizeof(Sample::servo_target) ==
               LibXRTest::SERVO_CHANNELS * sizeof(uint16_t));
+  TEST_ASSERT(sizeof(Sample::servo_actual) ==
+              LibXRTest::SERVO_CHANNELS * sizeof(uint16_t));
 
-  // RegionPayload 的字段只占 24B：最后一个 float 结束于 24，ABI 不补尾。而 seq 必须
-  // 落在 28，所以那 4B 是 Region 的显式填充。两个数都要钉住。
-  // RegionPayload's fields occupy only 24B; the ABI adds no tail padding, yet seq must
-  // land at 28, so those 4B are explicit padding on Region. Both numbers are pinned.
-  TEST_ASSERT(sizeof(RegionPayload) == 24);
-  TEST_ASSERT(offsetof(RegionPayload, aim_x) == 4);
-  TEST_ASSERT(offsetof(RegionPayload, aim_y) == 8);
-  TEST_ASSERT(offsetof(RegionPayload, cmd) == 12);
-  TEST_ASSERT(offsetof(RegionPayload, param_id) == 16);
-  TEST_ASSERT(offsetof(RegionPayload, value) == 20);
-
-  TEST_ASSERT(sizeof(Region) == kRegionBytes);
-  TEST_ASSERT(offsetof(Region, payload_pad) == 24);
+  TEST_ASSERT(sizeof(Region) == REGION_BYTES);
+  TEST_ASSERT(offsetof(Region, write_state) == 24);
   TEST_ASSERT(offsetof(Region, seq) == 28);
 
   TEST_ASSERT(TelemetryOffset() == 8);
-  TEST_ASSERT(RegionOffset() == PAGE_SIZE - kRegionBytes);
-  TEST_ASSERT(TelemetryOffset() + kTelemetryBytes <= RegionOffset());
+  TEST_ASSERT(RegionOffset() == PAGE_SIZE - REGION_BYTES);
+  TEST_ASSERT(TelemetryOffset() + TELEMETRY_BYTES <= RegionOffset());
 
   // 发布索引必须是页内一个可原子访问的 4B 计数。
   // The publish index must be one atomically accessible 4B counter in the page.
@@ -189,6 +195,12 @@ void TestLatest(const Mapping& mapping)
       reinterpret_cast<const TelemetryRing*>(mapping.Data() + TelemetryOffset());
   TEST_ASSERT(SameSample(ring->ring[2], MakeSample(2)));
   TEST_ASSERT(SameSample(ring->ring[0], MakeSample(0)));
+
+  auto* writable_ring =
+      reinterpret_cast<TelemetryRing*>(mapping.Data() + TelemetryOffset());
+  writable_ring->write_state.store(1, std::memory_order_release);
+  TEST_ASSERT(page.TelemetryWriter().Write(MakeSample(3)) == 0);
+  writable_ring->write_state.store(0, std::memory_order_release);
 }
 
 /// 5. `Since()` 的区间、上界与 gap。Range, bound and gap of `Since()`.
@@ -199,13 +211,20 @@ void TestSince(const Mapping& mapping)
   auto writer = page.TelemetryWriter();
   const auto reader = page.TelemetryReader();
 
-  RingScan scan = RingScan::DATA;
-  uint32_t next = 7;
+  SinceResult result = {};
   std::array<Sample, TELEMETRY_SLOTS> out = {};
 
-  TEST_ASSERT(reader.Since(0, &scan, &next, out.data(), out.size()) == 0);
-  TEST_ASSERT(scan == RingScan::IDLE);
-  TEST_ASSERT(next == 0);
+  auto* telemetry_ring =
+      reinterpret_cast<TelemetryRing*>(mapping.Data() + TelemetryOffset());
+  telemetry_ring->write_state.store(1, std::memory_order_release);
+  TEST_ASSERT(reader.Since(0, out.data(), out.size(), &result) == ErrorCode::BUSY);
+  TEST_ASSERT(result.dropped == 0);
+  telemetry_ring->write_state.store(0, std::memory_order_release);
+
+  TEST_ASSERT(reader.Since(0, out.data(), out.size(), &result) == ErrorCode::EMPTY);
+  TEST_ASSERT(result.written == 0);
+  TEST_ASSERT(result.dropped == 0);
+  TEST_ASSERT(result.next == 0);
 
   // 写者跑出 100 条，落后 90 槽的读者整段丢：`head - last > 64`。
   // The writer ran 100 ahead; a reader 90 slots behind drops the whole range.
@@ -214,9 +233,10 @@ void TestSince(const Mapping& mapping)
     writer.Write(MakeSample(index));
   }
   TEST_ASSERT(writer.Head() == 100);
-  TEST_ASSERT(reader.Since(10, &scan, &next, out.data(), out.size()) == 0);
-  TEST_ASSERT(scan == RingScan::GAP);
-  TEST_ASSERT(next == 100);
+  TEST_ASSERT(reader.Since(10, out.data(), out.size(), &result) == ErrorCode::EMPTY);
+  TEST_ASSERT(result.written == 0);
+  TEST_ASSERT(result.dropped == 90);
+  TEST_ASSERT(result.next == 100);
 
   // 正好落后 64 槽仍是可解析区间（上界是 `> 64`）。
   // Exactly 64 slots behind is still parseable: the bound is `> 64`.
@@ -225,9 +245,10 @@ void TestSince(const Mapping& mapping)
   {
     writer.Write(MakeSample(index));
   }
-  TEST_ASSERT(reader.Since(0, &scan, &next, out.data(), out.size()) == 64);
-  TEST_ASSERT(scan == RingScan::DATA);
-  TEST_ASSERT(next == 64);
+  TEST_ASSERT(reader.Since(0, out.data(), out.size(), &result) == ErrorCode::OK);
+  TEST_ASSERT(result.written == 64);
+  TEST_ASSERT(result.dropped == 0);
+  TEST_ASSERT(result.next == 64);
   for (uint32_t index = 0; index < 64; ++index)
   {
     TEST_ASSERT(SameSample(out[index], MakeSample(index)));
@@ -239,9 +260,10 @@ void TestSince(const Mapping& mapping)
   {
     writer.Write(MakeSample(index));
   }
-  TEST_ASSERT(reader.Since(next, &scan, &next, out.data(), out.size()) == 2);
-  TEST_ASSERT(scan == RingScan::DATA);
-  TEST_ASSERT(next == 66);
+  TEST_ASSERT(reader.Since(64, out.data(), out.size(), &result) == ErrorCode::OK);
+  TEST_ASSERT(result.written == 2);
+  TEST_ASSERT(result.dropped == 0);
+  TEST_ASSERT(result.next == 66);
   TEST_ASSERT(SameSample(out[0], MakeSample(64)));
   TEST_ASSERT(SameSample(out[1], MakeSample(65)));
 
@@ -249,23 +271,41 @@ void TestSince(const Mapping& mapping)
   // One more write proves the wrap: after ClearHistory() the index restarts at 0, so
   // head 66 lives in slot 2.
   writer.Write(MakeSample(66));
-  TEST_ASSERT(reader.Since(66, &scan, &next, out.data(), out.size()) == 1);
+  TEST_ASSERT(reader.Since(66, out.data(), out.size(), &result) == ErrorCode::OK);
+  TEST_ASSERT(result.written == 1);
+  TEST_ASSERT(result.next == 67);
   TEST_ASSERT(SameSample(out[0], MakeSample(66)));
   const auto* ring =
       reinterpret_cast<const TelemetryRing*>(mapping.Data() + TelemetryOffset());
   TEST_ASSERT(SameSample(ring->ring[2], MakeSample(66)));
 
-  // 接收缓冲为 nullptr 时只回答区间/gap 问题。
-  // A null receive buffer only answers the range/gap question.
-  TEST_ASSERT(reader.Since(66, &scan, &next, nullptr, 0) == 1);
-  TEST_ASSERT(scan == RingScan::DATA);
-  TEST_ASSERT(next == 67);
+  // 空缓冲仍回答区间问题，但没有样本可交付。
+  // A null buffer still answers the range question, but delivers no samples.
+  TEST_ASSERT(reader.Since(66, nullptr, TELEMETRY_SLOTS, &result) == ErrorCode::OK);
+  TEST_ASSERT(result.written == 0);
+  TEST_ASSERT(result.dropped == 1);
+  TEST_ASSERT(result.next == 67);
+
+  // 容量小于区间时只交付容量内的一段，其余计入 dropped（调用方缓冲不足，不是历史覆写）。
+  // 区间按「最新优先」拷贝，被裁掉的是最旧一端：tiny 里是最新的一条。
+  // A capacity smaller than the range delivers only what fits and counts the rest as
+  // dropped (caller capacity, not a history overwrite). The range is copied newest
+  // first, so clamping drops the oldest end and tiny keeps the newest sample.
+  std::array<Sample, 1> tiny = {};
+  writer.Write(MakeSample(67));
+  writer.Write(MakeSample(68));
+  TEST_ASSERT(reader.Since(67, tiny.data(), tiny.size(), &result) == ErrorCode::OK);
+  TEST_ASSERT(result.written == 1);
+  TEST_ASSERT(result.dropped == 1);
+  TEST_ASSERT(result.next == 69);
+  TEST_ASSERT(SameSample(tiny[0], MakeSample(68)));
 
   // 上一纪元留下的 last_seen（大于 head）是 gap，不是回绕出来的区间。
   // A last_seen from a previous epoch (larger than head) is a gap, not a wrapped range.
-  TEST_ASSERT(reader.Since(1000, &scan, &next, out.data(), out.size()) == 0);
-  TEST_ASSERT(scan == RingScan::GAP);
-  TEST_ASSERT(next == 67);
+  TEST_ASSERT(reader.Since(1000, out.data(), out.size(), &result) == ErrorCode::EMPTY);
+  TEST_ASSERT(result.written == 0);
+  TEST_ASSERT(result.dropped > 0);
+  TEST_ASSERT(result.next == 69);
 }
 
 /// 6. region 的稳定读、失败重试的上限与 BUSY 判定。
@@ -277,29 +317,34 @@ void TestRegion(const Mapping& mapping)
   auto reference = page.Region();
 
   Region snapshot = {};
-  TEST_ASSERT(reference.Read(&snapshot) == RegionScan::CURRENT);
+  TEST_ASSERT(reference.Read(&snapshot) == ErrorCode::OK);
   TEST_ASSERT(snapshot.seq.load() == 0);
-  TEST_ASSERT(snapshot.payload.found == 0);
+  TestProtocolPayload decoded = {};
+  std::memcpy(&decoded, snapshot.payload, sizeof(decoded));
+  TEST_ASSERT(decoded.found == 0);
 
-  RegionPayload payload = {};
+  TestProtocolPayload payload = {};
   payload.found = 1;
   payload.aim_x = 0.25F;
   payload.aim_y = -0.5F;
-  payload.cmd = Region::CMD_PARAM;
+  payload.cmd = 2;
   payload.param_id = 9;
   payload.value = 1.5F;
   TEST_ASSERT(reference.Write(payload) == 1);
-  TEST_ASSERT(reference.WriteAim(true, 0.125F, 0.75F) == 2);
 
-  TEST_ASSERT(reference.Read(&snapshot) == RegionScan::CURRENT);
+  payload = {};
+  payload.found = 1;
+  payload.aim_x = 0.125F;
+  payload.aim_y = 0.75F;
+  TEST_ASSERT(reference.Write(payload) == 2);
+
+  TEST_ASSERT(reference.Read(&snapshot) == ErrorCode::OK);
   TEST_ASSERT(snapshot.seq.load() == 2);
-  TEST_ASSERT(snapshot.payload.aim_x == 0.125F);
-  TEST_ASSERT(snapshot.payload.aim_y == 0.75F);
-  // WriteAim 只写 aim 字段，上一次的 cmd/param_id 随之清零（整块 payload 覆盖）。
-  // WriteAim writes only the aim fields, so the previous cmd/param_id are cleared by
-  // the whole-payload write.
-  TEST_ASSERT(snapshot.payload.cmd == 0);
-  TEST_ASSERT(snapshot.payload.param_id == 0);
+  std::memcpy(&decoded, snapshot.payload, sizeof(decoded));
+  TEST_ASSERT(decoded.aim_x == 0.125F);
+  TEST_ASSERT(decoded.aim_y == 0.75F);
+  TEST_ASSERT(decoded.cmd == 0);
+  TEST_ASSERT(decoded.param_id == 0);
 
   auto* region = reinterpret_cast<Region*>(mapping.Data() + RegionOffset());
   TEST_ASSERT(reference.Raw() == region);
@@ -312,19 +357,28 @@ void TestRegion(const Mapping& mapping)
   // The read must retry and the second attempt must return the completed payload
   // instead of accepting the torn intermediate.
   payload.aim_x = 123.0F;
-  region->payload = payload;
+  std::memcpy(region->payload, &payload, sizeof(payload));
   region->seq.store(3, std::memory_order_release);
   region->seq.store(2, std::memory_order_release);
-  TEST_ASSERT(reference.Read(&snapshot) == RegionScan::CURRENT);
+  TEST_ASSERT(reference.Read(&snapshot) == ErrorCode::OK);
   TEST_ASSERT(snapshot.seq.load() == 2);
-  TEST_ASSERT(snapshot.payload.aim_x == 123.0F);
+  std::memcpy(&decoded, snapshot.payload, sizeof(decoded));
+  TEST_ASSERT(decoded.aim_x == 123.0F);
 
   // BUSY 只在重试上限内读不到自洽快照时出现：把重试预算设为 0 就等于强制走该分支，
   // 用来钉住「预算耗尽后仍返回最后一次拷贝并标记 BUSY」的约定。
   // BUSY appears only when no coherent snapshot fits the retry budget; a budget of 0
   // forces that branch and pins the "return the last copy tagged BUSY" contract.
-  TEST_ASSERT(reference.Read(&snapshot, 0) == RegionScan::BUSY);
-  TEST_ASSERT(snapshot.payload.aim_x == 123.0F);
+  TEST_ASSERT(reference.Read(&snapshot, 0) == ErrorCode::BUSY);
+  std::memcpy(&decoded, snapshot.payload, sizeof(decoded));
+  TEST_ASSERT(decoded.aim_x == 123.0F);
+
+  region->write_state.store(1, std::memory_order_release);
+  TEST_ASSERT(reference.Read(&snapshot) == ErrorCode::BUSY);
+  std::memcpy(&decoded, snapshot.payload, sizeof(decoded));
+  TEST_ASSERT(decoded.aim_x == 123.0F);
+  TEST_ASSERT(reference.Write(payload) == 0);
+  region->write_state.store(0, std::memory_order_release);
 }
 
 /// 7. 访问单元页的单槽借还语义。Single-slot borrow semantics of the access-unit page.
@@ -347,11 +401,17 @@ void TestAccessUnit()
     frame[index] = static_cast<uint8_t>(index);
   }
 
+  auto* slot = reinterpret_cast<AccessUnit*>(memory);
+  slot->write_state.store(1, std::memory_order_release);
+  TEST_ASSERT(mailbox.Publish(frame.data(), 1, 1, 1, 1) == 0);
+  TEST_ASSERT(!mailbox.Acquire().Valid());
+  slot->write_state.store(0, std::memory_order_release);
+
   TEST_ASSERT(
       mailbox.Publish(frame.data(), 48, AccessUnit::FORMAT_H264_ANNEX_B, 640, 480) == 1);
 
   const uint32_t length = 48;
-  const auto view = mailbox.Acquire(true);
+  const auto view = mailbox.Acquire();
   TEST_ASSERT(view.Valid());
   TEST_ASSERT(view.length == length);
   TEST_ASSERT(view.format == AccessUnit::FORMAT_H264_ANNEX_B);
@@ -359,11 +419,6 @@ void TestAccessUnit()
   TEST_ASSERT(view.height == 480);
   TEST_ASSERT(view.seq == 1);
   TEST_ASSERT(std::memcmp(view.data, frame.data(), length) == 0);
-
-  // Publish() 用 LibXR::CRC32 写入校验值，页内保存的就是该算法的结果。
-  // Publish() stores the LibXR::CRC32 result, so the page holds that algorithm's value.
-  const auto* slot = reinterpret_cast<const AccessUnit*>(memory);
-  TEST_ASSERT(slot->crc32.load() == CRC32::Calculate(frame.data(), length));
 
   // 借出一次即清 ready：同一帧不会被消费两次。
   // One take clears ready, so one frame is consumed once.
@@ -374,35 +429,22 @@ void TestAccessUnit()
   frame[0] = 0xAB;
   TEST_ASSERT(
       mailbox.Publish(frame.data(), 16, AccessUnit::FORMAT_H264_ANNEX_B, 320, 240) == 2);
-  const auto second = mailbox.Acquire(true);
+  const auto second = mailbox.Acquire();
   TEST_ASSERT(second.Valid());
   TEST_ASSERT(second.seq == 2);
   TEST_ASSERT(second.length == 16);
   TEST_ASSERT(second.width == 320);
   TEST_ASSERT(second.data[0] == 0xAB);
 
-  // 校验失败：把页内 payload 改坏，取帧必须拒绝，且 ready 保持置位以便重试。
-  // A failed check: corrupting the in-page payload must be rejected, with `ready` left
-  // set so the caller can retry.
+  // 契约不设 CRC：取帧即热路径，没有校验参数（一致性由 seq 双重读保证）。
+  // The contract carries no CRC: the take is the hot path with no check parameter
+  // (coherence comes from the double read of seq).
   TEST_ASSERT(
       mailbox.Publish(frame.data(), 16, AccessUnit::FORMAT_H264_ANNEX_B, 320, 240) == 3);
-  auto* corrupt = reinterpret_cast<AccessUnit*>(memory);
-  corrupt->payload[0] ^= 0xFFU;
-  TEST_ASSERT(!mailbox.Acquire(true).Valid());
-  TEST_ASSERT(corrupt->ready.load() == 1);
-
-  // 关掉校验时不复算，取帧照常成功（热路径）。
-  // With the check off nothing is recomputed and the take succeeds, which is the hot
-  // path.
-  const auto unchecked = mailbox.Acquire(false);
-  TEST_ASSERT(unchecked.Valid());
-  TEST_ASSERT(unchecked.seq == 3);
-
-  // 计算 CRC32 不是强制的：关掉时页内记 0，表示未计算。
-  // Computing the CRC32 is optional: turned off, the page records 0 for "not computed".
-  TEST_ASSERT(mailbox.Publish(frame.data(), 16, AccessUnit::FORMAT_H264_ANNEX_B, 320, 240,
-                              false) == 4);
-  TEST_ASSERT(corrupt->crc32.load() == 0);
+  const auto third = mailbox.Acquire();
+  TEST_ASSERT(third.Valid());
+  TEST_ASSERT(third.seq == 3);
+  TEST_ASSERT(third.data[0] == 0xAB);
 
   // 越界与空指针被拒绝，而不是截断。
   // Oversized and null publishes are rejected, not truncated.
@@ -412,16 +454,17 @@ void TestAccessUnit()
   // 正好到上界的发布被接受（边界是 `> MAX`）。
   // A publish exactly at the limit is accepted: the bound is `> MAX`.
   std::vector<uint8_t> full_frame(AccessUnit::MAX_BYTES, 0x5AU);
-  TEST_ASSERT(mailbox.Publish(full_frame.data(), AccessUnit::MAX_BYTES, 1, 2, 3) == 5);
-  const auto full = mailbox.Acquire(true);
+  TEST_ASSERT(mailbox.Publish(full_frame.data(), AccessUnit::MAX_BYTES, 1, 2, 3) == 4);
+  const auto full = mailbox.Acquire();
   TEST_ASSERT(full.Valid());
   TEST_ASSERT(full.length == AccessUnit::MAX_BYTES);
   TEST_ASSERT(full.data[AccessUnit::MAX_BYTES - 1] == 0x5AU);
 
   // 头部在页首，payload 紧随其后。
   // The header occupies the start of the page and the payload follows it.
-  TEST_ASSERT(slot->magic == ACCESS_UNIT_MAGIC);
-  TEST_ASSERT(reinterpret_cast<const uint8_t*>(slot->payload) ==
+  const auto* slot_view = reinterpret_cast<const AccessUnit*>(memory);
+  TEST_ASSERT(slot_view->magic == ACCESS_UNIT_MAGIC);
+  TEST_ASSERT(reinterpret_cast<const uint8_t*>(slot_view->payload) ==
               memory + offsetof(AccessUnit, payload));
 }
 

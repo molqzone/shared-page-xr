@@ -24,7 +24,7 @@
 #include <sys/mman.h>
 
 #include <array>
-#include <cstring>
+#include <type_traits>
 
 #include "linux_shared_page.hpp"
 #include "sample.hpp"
@@ -45,6 +45,22 @@ struct BatchCapture
   std::array<uint32_t, 8> counts = {};
   std::array<uint64_t, 8> timestamps_us = {};
 };
+
+struct ProtocolPayload
+{
+  uint8_t found = 0;
+  uint8_t pad[3] = {};
+  float aim_x = 0;
+  float aim_y = 0;
+  uint8_t cmd = 0;
+  uint8_t pad2[3] = {};
+  uint16_t param_id = 0;
+  float value = 0;
+
+  static constexpr uint8_t CMD_PARAM = 2;
+};
+
+static_assert(sizeof(ProtocolPayload) == REGION_PAYLOAD_BYTES);
 
 void OnBatch(bool, BatchCapture* capture,
              const LibXR::Topic::MessageView<TelemetryBatch>& message)
@@ -88,19 +104,26 @@ class Mapping
 
 int main()
 {
+  static_assert(std::is_base_of_v<LibXR::Topic, SharedPage>);
+  static_assert(std::is_base_of_v<LibXR::Topic, LinuxSharedPage>);
+
   Mapping mapping(PAGE_SIZE);
   SharedPage page(mapping.Data());
   page.Format();
   TEST_ASSERT(page.Ready());
 
-  LibXR::Topic::Domain domain(SHARED_PAGE_DOMAIN_NAME);
+  LibXR::Topic::Domain domain("shared_page_xr");
   LibXR::Topic topic(
       LibXR::Topic::FindOrCreate<TelemetryBatch>(TELEMETRY_TOPIC_NAME, &domain));
   BatchCapture capture;
   auto callback = LibXR::Topic::Callback::Create(OnBatch, &capture);
-  topic.RegisterCallback(callback);
 
-  LinuxSharedPage adapter(page, topic);
+  LinuxSharedPage adapter(page, topic, 1000);
+  LibXR::Topic& boundary = adapter;
+  boundary.RegisterCallback(callback);
+
+  LinuxSharedPage produced(page, "shared_page_owned_topic");
+  TEST_ASSERT(produced.PayloadSize() == sizeof(TelemetryBatch));
 
   // 第一次 Poll 只确立节律基准；C606 侧还没写数据，所以不发布。
   // The first poll only establishes the cadence baseline; nothing has been written on
@@ -185,40 +208,64 @@ int main()
   TEST_ASSERT(SameSample(capture.last.ring[0], MakeSample(80)));
   TEST_ASSERT(SameSample(capture.last.ring[1], MakeSample(81)));
 
-  // 下行方向：aim 经独立页视图可见，索引递增，命令参数保持单位与取值。
-  // The downlink direction: the aim write is visible through an independent page view
-  // with a bumped index and a command keeps its units and value.
-  TEST_ASSERT(epoch_adapter.WriteAim(true, 0.5F, -0.25F) == 1);
-  TEST_ASSERT(epoch_adapter.WriteParam(7, 3.5F) == 2);
+  auto* telemetry_ring =
+      reinterpret_cast<TelemetryRing*>(mapping.Data() + TelemetryOffset());
+  telemetry_ring->write_state.store(1, std::memory_order_release);
+  TelemetryBatch busy_batch = {};
+  TEST_ASSERT(epoch_adapter.Drain(&busy_batch) == 0);
+  TEST_ASSERT(epoch_adapter.LastSeen() == 82);
+  telemetry_ring->write_state.store(0, std::memory_order_release);
+
+  ProtocolPayload payload = {};
+  payload.found = 1;
+  payload.aim_x = 0.5F;
+  payload.aim_y = -0.25F;
+  TEST_ASSERT(epoch_adapter.Region().Write(payload) == 1);
+
+  payload = {};
+  payload.cmd = ProtocolPayload::CMD_PARAM;
+  payload.param_id = 7;
+  payload.value = 3.5F;
+  TEST_ASSERT(epoch_adapter.Region().Write(payload) == 2);
 
   SharedPage c606_view(mapping.Data());
   Region snapshot = {};
-  TEST_ASSERT(c606_view.Region().Read(&snapshot) == RegionScan::CURRENT);
+  TEST_ASSERT(c606_view.Region().Read(&snapshot) == ErrorCode::OK);
   TEST_ASSERT(snapshot.seq.load() == 2);
-  TEST_ASSERT(snapshot.payload.cmd == Region::CMD_PARAM);
-  TEST_ASSERT(snapshot.payload.param_id == 7);
-  TEST_ASSERT(snapshot.payload.value == 3.5F);
-  // WriteParam 不带 aim，整块 payload 覆盖后 found/aim 归零。
-  // WriteParam carries no aim, so the whole-payload write clears found/aim.
-  TEST_ASSERT(snapshot.payload.found == 0);
-  TEST_ASSERT(snapshot.payload.aim_x == 0.0F);
+  ProtocolPayload decoded = {};
+  TEST_ASSERT(c606_view.Region().Read(&decoded) == ErrorCode::OK);
+  TEST_ASSERT(decoded.cmd == ProtocolPayload::CMD_PARAM);
+  TEST_ASSERT(decoded.param_id == 7);
+  TEST_ASSERT(decoded.value == 3.5F);
+  TEST_ASSERT(decoded.found == 0);
+  TEST_ASSERT(decoded.aim_x == 0.0F);
 
   // aim 与命令共用一块 region，后写者覆盖前写者：这是「一次事件一次 region 写」的
   // 约定，不是丢更新。
   // The aim and the command share one region, so the last writer wins: that is the
   // one-region-write-per-event contract, not a lost update.
-  TEST_ASSERT(epoch_adapter.WriteAim(false, 0.0F, 0.0F) == 3);
-  TEST_ASSERT(c606_view.Region().Read(&snapshot) == RegionScan::CURRENT);
+  payload = {};
+  TEST_ASSERT(epoch_adapter.Region().Write(payload) == 3);
+  TEST_ASSERT(c606_view.Region().Read(&snapshot) == ErrorCode::OK);
   TEST_ASSERT(snapshot.seq.load() == 3);
-  TEST_ASSERT(snapshot.payload.found == 0);
-  TEST_ASSERT(snapshot.payload.cmd == 0);
+  TEST_ASSERT(c606_view.Region().Read(&decoded) == ErrorCode::OK);
+  TEST_ASSERT(decoded.found == 0);
+  TEST_ASSERT(decoded.cmd == 0);
 
   // 冷页不产生消息。A cold page produces no message.
   page.ClearHistory();
   SharedPage blank_page(mapping.Data());
-  LinuxSharedPage blank_adapter(blank_page, topic);
+  LinuxSharedPage blank_adapter(blank_page, topic, 1000);
   blank_adapter.Poll(2000000);
   TEST_ASSERT(capture.calls == 5);
+
+  LinuxSharedPage rollback_adapter(page, topic, 1000);
+  rollback_adapter.Poll(5000);
+  writer.Write(MakeSample(82));
+  TEST_ASSERT(rollback_adapter.Poll(4000));
+  TEST_ASSERT(capture.calls == 6);
+  TEST_ASSERT(capture.last.count == 1);
+  TEST_ASSERT(SameSample(capture.last.ring[0], MakeSample(82)));
 
   return 0;
 }

@@ -2,22 +2,71 @@
 
 #include <cstring>
 
-#include "crc.hpp"
-
-/**
- * @file shared_page.cpp
- * @brief `shared_page.hpp` 的实现。Implementation of `shared_page.hpp`.
- */
-
 namespace LibXR
 {
-PageBase::PageBase(void* addr) : page_(static_cast<uint8_t*>(addr)) {}
+namespace
+{
+constexpr uint32_t READ_RETRIES = 8;
 
-bool PageBase::Valid() const { return page_ != nullptr; }
+bool try_claim(std::atomic<uint32_t>& state)
+{
+  uint32_t expected = 0;
+  return state.compare_exchange_strong(expected, 1, std::memory_order_acquire,
+                                       std::memory_order_relaxed);
+}
 
-uint8_t* PageBase::Data() const { return page_; }
+void atomic_word_store(uint32_t* destination, uint32_t value)
+{
+  std::atomic_ref<uint32_t>(*destination).store(value, std::memory_order_relaxed);
+}
 
-PageMagicKind PageBase::Check() const
+uint32_t atomic_word_load(const uint32_t* source)
+{
+  return std::atomic_ref<uint32_t>(const_cast<uint32_t&>(*source))
+      .load(std::memory_order_relaxed);
+}
+
+template <size_t Bytes>
+void atomic_store(void* destination, const void* source)
+{
+  static_assert(Bytes % sizeof(uint32_t) == 0);
+  uint32_t words[Bytes / sizeof(uint32_t)];
+  std::memcpy(words, source, Bytes);
+  auto* target = static_cast<uint32_t*>(destination);
+  for (size_t index = 0; index < Bytes / sizeof(uint32_t); ++index)
+  {
+    std::atomic_ref<uint32_t>(target[index])
+        .store(words[index], std::memory_order_relaxed);
+  }
+}
+
+template <size_t Bytes>
+void atomic_load(void* destination, const void* source)
+{
+  static_assert(Bytes % sizeof(uint32_t) == 0);
+  uint32_t words[Bytes / sizeof(uint32_t)];
+  const auto* source_words = static_cast<const uint32_t*>(source);
+  for (size_t index = 0; index < Bytes / sizeof(uint32_t); ++index)
+  {
+    words[index] = std::atomic_ref<uint32_t>(const_cast<uint32_t&>(source_words[index]))
+                       .load(std::memory_order_relaxed);
+  }
+  std::memcpy(destination, words, Bytes);
+}
+}  // namespace
+
+SharedPage::SharedPage(void* addr) : Topic(), page_(static_cast<uint8_t*>(addr)) {}
+
+SharedPage::SharedPage(void* addr, Topic topic)
+    : Topic(topic), page_(static_cast<uint8_t*>(addr))
+{
+}
+
+bool SharedPage::Valid() const { return page_ != nullptr; }
+
+uint8_t* SharedPage::Data() const { return page_; }
+
+PageMagicKind SharedPage::Check() const
 {
   if (page_ == nullptr)
   {
@@ -30,8 +79,7 @@ PageMagicKind PageBase::Check() const
     return PageMagicKind::FORMATTED;
   }
 
-  // 全零页面视为「刚上电 / 映射错地址」；其余内容视为外来数据。
-  // An all-zero page is treated as cold or mis-mapped; anything else is foreign.
+  // A zero page is unformatted; any other invalid header is foreign.
   for (size_t i = 0; i < PAGE_SIZE; ++i)
   {
     if (page_[i] != 0)
@@ -42,7 +90,7 @@ PageMagicKind PageBase::Check() const
   return PageMagicKind::UNFORMATTED;
 }
 
-void PageBase::Format()
+void SharedPage::Format()
 {
   if (page_ == nullptr)
   {
@@ -55,46 +103,60 @@ void PageBase::Format()
   nodes->page_size = PAGE_SIZE;
 }
 
-void PageBase::ClearHistory()
+void SharedPage::ClearHistory()
 {
   if (page_ == nullptr)
   {
     return;
   }
 
-  TelemetryRing* telemetry = nullptr;
-  Region* region = nullptr;
-  Split(&telemetry, &region);
+  auto* telemetry = reinterpret_cast<TelemetryRing*>(page_ + TelemetryOffset());
+  auto* reference = reinterpret_cast<LibXR::Region*>(page_ + RegionOffset());
+  if (!try_claim(telemetry->write_state))
+  {
+    return;
+  }
+  if (!try_claim(reference->write_state))
+  {
+    telemetry->write_state.store(0, std::memory_order_release);
+    return;
+  }
   telemetry->head.store(0, std::memory_order_release);
-  region->seq.store(0, std::memory_order_release);
-}
-
-void PageBase::Split(TelemetryRing** telemetry, Region** region) const
-{
-  ASSERT(page_ != nullptr);
-  *telemetry = reinterpret_cast<TelemetryRing*>(page_ + TelemetryOffset());
-  *region = reinterpret_cast<Region*>(page_ + RegionOffset());
+  reference->seq.store(0, std::memory_order_release);
+  reference->write_state.store(0, std::memory_order_release);
+  telemetry->write_state.store(0, std::memory_order_release);
 }
 
 Telemetry::Telemetry(void* addr)
-    : head_(reinterpret_cast<std::atomic<uint32_t>*>(static_cast<uint8_t*>(addr) +
-                                                     TelemetryOffset() +
-                                                     offsetof(TelemetryRing, head)))
 {
+  if (addr == nullptr)
+  {
+    return;
+  }
+
+  auto* telemetry =
+      reinterpret_cast<TelemetryRing*>(static_cast<uint8_t*>(addr) + TelemetryOffset());
+  head_ = &telemetry->head;
+  state_ = &telemetry->write_state;
+  ring_ = telemetry->ring;
 }
 
 uint32_t Telemetry::Write(const Sample& sample)
 {
   ASSERT(head_ != nullptr);
+  ASSERT(state_ != nullptr);
 
-  // head_ 指向页内原子对象，物理上就是 mmap 出来的非缓存内存。
-  // head_ points at an in-page atomic object backed by non-cached mapped memory.
+  uint32_t expected = 0;
+  if (!state_->compare_exchange_strong(expected, 1, std::memory_order_acquire,
+                                       std::memory_order_relaxed))
+  {
+    return 0;
+  }
+
   const uint32_t head = head_->load(std::memory_order_relaxed);
-  const auto* ring = reinterpret_cast<const Sample*>(
-      reinterpret_cast<const uint8_t*>(head_) - offsetof(TelemetryRing, head));
-  auto* slot = const_cast<Sample*>(&ring[head % TELEMETRY_SLOTS]);
-  *slot = sample;
+  atomic_store<sizeof(Sample)>(&ring_[head % TELEMETRY_SLOTS], &sample);
   head_->store(head + 1, std::memory_order_release);
+  state_->store(0, std::memory_order_release);
   return head + 1;
 }
 
@@ -105,107 +167,144 @@ uint32_t Telemetry::Head() const
 
 bool Telemetry::Latest(Sample* sample) const
 {
-  if (sample == nullptr || head_ == nullptr)
+  if (sample == nullptr || head_ == nullptr || state_ == nullptr || ring_ == nullptr)
   {
     return false;
   }
 
-  const uint32_t head = head_->load(std::memory_order_acquire);
-  if (head == 0)
+  for (uint32_t attempt = 0; attempt < READ_RETRIES; ++attempt)
   {
-    return false;
+    if (state_->load(std::memory_order_acquire) != 0)
+    {
+      continue;
+    }
+
+    const uint32_t head = head_->load(std::memory_order_acquire);
+    if (head == 0)
+    {
+      return false;
+    }
+
+    Sample value = {};
+    atomic_load<sizeof(Sample)>(&value, &ring_[(head - 1) % TELEMETRY_SLOTS]);
+    const uint32_t after = head_->load(std::memory_order_acquire);
+    if (after == head && state_->load(std::memory_order_acquire) == 0)
+    {
+      *sample = value;
+      return true;
+    }
   }
 
-  const auto* ring = reinterpret_cast<const Sample*>(
-      reinterpret_cast<const uint8_t*>(head_) - offsetof(TelemetryRing, head));
-  *sample = ring[(head - 1) % TELEMETRY_SLOTS];
-  return true;
+  return false;
 }
 
-uint32_t Telemetry::Since(uint32_t last_seen, RingScan* scan, uint32_t* next,
-                          Sample* samples, uint32_t capacity) const
+ErrorCode Telemetry::Since(uint32_t last_seen, Sample* samples, uint32_t capacity,
+                           SinceResult* result) const
 {
-  ASSERT(scan != nullptr);
-  ASSERT(next != nullptr);
+  ASSERT(result != nullptr);
   ASSERT(head_ != nullptr);
+  ASSERT(state_ != nullptr);
+  ASSERT(ring_ != nullptr);
 
-  const uint32_t head = head_->load(std::memory_order_acquire);
+  result->written = 0;
+  result->dropped = 0;
 
-  if (head == last_seen)
+  for (uint32_t attempt = 0; attempt < READ_RETRIES; ++attempt)
   {
-    *scan = RingScan::IDLE;
-    *next = head;
-    return 0;
-  }
-
-  if (head - last_seen > TELEMETRY_SLOTS)
-  {
-    *scan = RingScan::GAP;
-    *next = head;
-    return 0;
-  }
-
-  const uint32_t count = head - last_seen;
-
-  // 写者可能在区间判定与拷贝之间继续推进并覆写最旧槽，所以按最新优先倒序拷贝，让区间里
-  // 最旧的一条尽早读到，撕裂窗口最小。
-  // The writer may advance between the range decision and the copies, overwriting the
-  // oldest slots, so the range is copied newest first to read its oldest sample as early
-  // as possible.
-  const auto* ring = reinterpret_cast<const Sample*>(
-      reinterpret_cast<const uint8_t*>(head_) - offsetof(TelemetryRing, head));
-  if (samples != nullptr)
-  {
-    const uint32_t limit = count < capacity ? count : capacity;
-    for (uint32_t i = 0; i < limit; ++i)
+    if (state_->load(std::memory_order_acquire) != 0)
     {
-      samples[i] = ring[(head - 1 - i) % TELEMETRY_SLOTS];
+      continue;
     }
-    // 倒序读入后翻正，调用者拿到正序区间。
-    // Reverse the newest-first copies so the caller sees the range in order.
-    for (uint32_t i = 0, j = (limit == 0) ? 0 : limit - 1; i < j; ++i, --j)
+
+    const uint32_t head = head_->load(std::memory_order_acquire);
+    result->next = head;
+    if (head == last_seen)
     {
-      const Sample tmp = samples[i];
-      samples[i] = samples[j];
-      samples[j] = tmp;
+      return ErrorCode::EMPTY;
     }
+
+    const uint32_t count = head - last_seen;
+    if (count > TELEMETRY_SLOTS)
+    {
+      const uint32_t after = head_->load(std::memory_order_acquire);
+      if (after != head || state_->load(std::memory_order_acquire) != 0)
+      {
+        continue;
+      }
+      result->next = head;
+      result->dropped = count;
+      return ErrorCode::EMPTY;
+    }
+
+    const uint32_t written =
+        samples == nullptr ? 0 : ((count < capacity) ? count : capacity);
+    if (samples != nullptr)
+    {
+      for (uint32_t index = 0; index < written; ++index)
+      {
+        atomic_load<sizeof(Sample)>(&samples[index],
+                                    &ring_[(head - 1 - index) % TELEMETRY_SLOTS]);
+      }
+      for (uint32_t first = 0, last = written == 0 ? 0 : written - 1; first < last;
+           ++first, --last)
+      {
+        const Sample value = samples[first];
+        samples[first] = samples[last];
+        samples[last] = value;
+      }
+    }
+
+    if (head_->load(std::memory_order_acquire) != head ||
+        state_->load(std::memory_order_acquire) != 0)
+    {
+      continue;
+    }
+
+    result->written = written;
+    result->dropped = count - written;
+    return ErrorCode::OK;
   }
 
-  *scan = RingScan::DATA;
-  *next = head;
-  return count;
+  result->next = head_->load(std::memory_order_acquire);
+  result->dropped = 0;
+  return ErrorCode::BUSY;
 }
 
 uint32_t Telemetry::SeekToHead() const { return Head(); }
 
 Reference::Reference(void* addr)
-    : region_(reinterpret_cast<Region*>(static_cast<uint8_t*>(addr) + RegionOffset()))
+    : region_(addr == nullptr ? nullptr
+                              : reinterpret_cast<Region*>(static_cast<uint8_t*>(addr) +
+                                                          RegionOffset()))
 {
 }
 
-RegionScan Reference::Read(Region* out, uint32_t retries) const
+ErrorCode Reference::Read(Region* out, uint32_t retries) const
 {
   ASSERT(out != nullptr);
   ASSERT(region_ != nullptr);
 
   for (uint32_t attempt = 0; attempt < retries; ++attempt)
   {
-    const uint32_t before = region_->seq.load(std::memory_order_acquire);
-    out->payload = region_->payload;
-    const uint32_t after = region_->seq.load(std::memory_order_acquire);
-    if (before == after)
+    if (region_->write_state.load(std::memory_order_acquire) != 0)
     {
+      continue;
+    }
+
+    const uint32_t before = region_->seq.load(std::memory_order_acquire);
+    uint8_t payload[REGION_PAYLOAD_BYTES] = {};
+    atomic_load<REGION_PAYLOAD_BYTES>(payload, region_->payload);
+    const uint32_t after = region_->seq.load(std::memory_order_acquire);
+    if (before == after && region_->write_state.load(std::memory_order_acquire) == 0)
+    {
+      std::memcpy(out->payload, payload, REGION_PAYLOAD_BYTES);
+      out->write_state.store(0, std::memory_order_relaxed);
       out->seq.store(after, std::memory_order_relaxed);
-      return RegionScan::CURRENT;
+      return ErrorCode::OK;
     }
   }
 
-  // 重试上限内未读到自洽快照（写者持续发布）：返回最后一次拷贝并标记 BUSY。
-  // No coherent snapshot within the retry budget (the writer keeps publishing): return
-  // the last copy tagged BUSY.
-  out->payload = region_->payload;
-  out->seq.store(region_->seq.load(std::memory_order_acquire), std::memory_order_relaxed);
-  return RegionScan::BUSY;
+  return ErrorCode::BUSY;
 }
 
 uint32_t Reference::Seq() const
@@ -213,28 +312,31 @@ uint32_t Reference::Seq() const
   return region_ == nullptr ? 0 : region_->seq.load(std::memory_order_acquire);
 }
 
-uint32_t Reference::Write(const RegionPayload& payload)
+uint32_t Reference::Write(const void* payload, size_t size)
 {
   ASSERT(region_ != nullptr);
 
-  region_->payload = payload;
+  if (payload == nullptr || size > REGION_PAYLOAD_BYTES)
+  {
+    return 0;
+  }
+
+  uint8_t value[REGION_PAYLOAD_BYTES] = {};
+  std::memcpy(value, payload, size);
+
+  if (!try_claim(region_->write_state))
+  {
+    return 0;
+  }
+
   const uint32_t next = region_->seq.load(std::memory_order_relaxed) + 1;
+  atomic_store<REGION_PAYLOAD_BYTES>(region_->payload, value);
   region_->seq.store(next, std::memory_order_release);
+  region_->write_state.store(0, std::memory_order_release);
   return next;
 }
 
-uint32_t Reference::WriteAim(bool found, float aim_x, float aim_y)
-{
-  RegionPayload payload = {};
-  payload.found = found ? 1U : 0U;
-  payload.aim_x = aim_x;
-  payload.aim_y = aim_y;
-  return Write(payload);
-}
-
 const Region* Reference::Raw() const { return region_; }
-
-SharedPage::SharedPage(void* addr) : PageBase(addr) {}
 
 bool SharedPage::Ready() const { return Check() == PageMagicKind::FORMATTED; }
 
@@ -258,7 +360,11 @@ uint32_t SharedPage::WriteSample(const Sample& sample)
 
 bool SharedPage::Latest(Sample* sample) const { return TelemetryReader().Latest(sample); }
 
-AccessUnitPage::AccessUnitPage(void* addr) : PageBase(addr) {}
+AccessUnitPage::AccessUnitPage(void* addr) : page_(static_cast<uint8_t*>(addr)) {}
+
+bool AccessUnitPage::Valid() const { return page_ != nullptr; }
+
+uint8_t* AccessUnitPage::Data() const { return page_; }
 
 void AccessUnitPage::Format()
 {
@@ -275,8 +381,7 @@ void AccessUnitPage::Format()
   slot->seq.store(0, std::memory_order_release);
   slot->length.store(0, std::memory_order_release);
   slot->ready.store(0, std::memory_order_release);
-  slot->crc32.store(0, std::memory_order_release);
-  slot->reserved = 0;
+  slot->write_state.store(0, std::memory_order_release);
 }
 
 PageMagicKind AccessUnitPage::Check() const
@@ -285,12 +390,15 @@ PageMagicKind AccessUnitPage::Check() const
   {
     return PageMagicKind::UNFORMATTED;
   }
-  return Slot()->magic == ACCESS_UNIT_MAGIC ? PageMagicKind::FORMATTED
-                                            : PageMagicKind::UNFORMATTED;
+  if (Slot()->magic == ACCESS_UNIT_MAGIC)
+  {
+    return PageMagicKind::FORMATTED;
+  }
+  return Slot()->magic == 0 ? PageMagicKind::UNFORMATTED : PageMagicKind::FOREIGN;
 }
 
 uint32_t AccessUnitPage::Publish(const void* data, uint32_t length, uint32_t format,
-                                 uint32_t width, uint32_t height, bool compute_crc32)
+                                 uint32_t width, uint32_t height)
 {
   if (Data() == nullptr || data == nullptr || length > AccessUnit::MAX_BYTES)
   {
@@ -298,26 +406,31 @@ uint32_t AccessUnitPage::Publish(const void* data, uint32_t length, uint32_t for
   }
 
   auto* slot = Slot();
-  std::memcpy(slot->payload, data, length);
-  slot->format = format;
-  slot->width = width;
-  slot->height = height;
-  slot->crc32.store(compute_crc32 ? CRC32::Calculate(data, length) : 0,
-                    std::memory_order_relaxed);
-  slot->length.store(length, std::memory_order_relaxed);
-  slot->ready.store(1, std::memory_order_relaxed);
+  uint32_t expected = 0;
+  if (!slot->write_state.compare_exchange_strong(expected, 1, std::memory_order_acquire,
+                                                 std::memory_order_relaxed))
+  {
+    return 0;
+  }
 
-  // release：保证 payload/头部字段对取帧者可见再公开 seq。
-  // release: make the payload and header fields visible before publishing seq.
+  slot->ready.store(0, std::memory_order_release);
+  std::memcpy(slot->payload, data, length);
+  atomic_word_store(&slot->format, format);
+  atomic_word_store(&slot->width, width);
+  atomic_word_store(&slot->height, height);
+  slot->length.store(length, std::memory_order_relaxed);
+
   const uint32_t next = slot->seq.load(std::memory_order_relaxed) + 1;
   slot->seq.store(next, std::memory_order_release);
+  slot->ready.store(1, std::memory_order_release);
+  slot->write_state.store(0, std::memory_order_release);
   return next;
 }
 
-AccessUnitPage::View AccessUnitPage::Acquire(bool verify_crc32, uint32_t retries)
+AccessUnitPage::View AccessUnitPage::Acquire(uint32_t retries)
 {
   View view = {};
-  if (Data() == nullptr)
+  if (Data() == nullptr || Check() != PageMagicKind::FORMATTED)
   {
     return view;
   }
@@ -330,6 +443,11 @@ AccessUnitPage::View AccessUnitPage::Acquire(bool verify_crc32, uint32_t retries
 
   for (uint32_t attempt = 0; attempt < retries; ++attempt)
   {
+    if (slot->write_state.load(std::memory_order_acquire) != 0)
+    {
+      continue;
+    }
+
     const uint32_t before = slot->seq.load(std::memory_order_acquire);
     const uint32_t length = slot->length.load(std::memory_order_acquire);
     if (length > AccessUnit::MAX_BYTES)
@@ -337,26 +455,28 @@ AccessUnitPage::View AccessUnitPage::Acquire(bool verify_crc32, uint32_t retries
       break;
     }
     const uint32_t after = slot->seq.load(std::memory_order_acquire);
-    if (before == after)
+    if (before == after && slot->write_state.load(std::memory_order_acquire) == 0)
     {
       view.data = slot->payload;
       view.length = length;
-      view.format = slot->format;
-      view.width = slot->width;
-      view.height = slot->height;
+      view.format = atomic_word_load(&slot->format);
+      view.width = atomic_word_load(&slot->width);
+      view.height = atomic_word_load(&slot->height);
       view.seq = before;
 
-      // 校验失败不动 ready：该帧留待重试，而不是被当成已消费。
-      // A failed check leaves `ready` set, so the frame can be retried instead of
-      // counting as consumed.
-      const uint32_t stored = slot->crc32.load(std::memory_order_relaxed);
-      if (verify_crc32 && stored != 0 && CRC32::Calculate(view.data, length) != stored)
+      if (slot->seq.load(std::memory_order_acquire) != before ||
+          slot->write_state.load(std::memory_order_acquire) != 0)
       {
-        return View{};
+        continue;
       }
 
-      slot->ready.store(0, std::memory_order_release);
-      return view;
+      uint32_t expected = 1;
+      if (slot->ready.compare_exchange_strong(expected, 0, std::memory_order_acq_rel,
+                                              std::memory_order_acquire))
+      {
+        return view;
+      }
+      return View{};
     }
   }
 
@@ -365,7 +485,9 @@ AccessUnitPage::View AccessUnitPage::Acquire(bool verify_crc32, uint32_t retries
 
 AccessUnit* AccessUnitPage::Slot() const
 {
-  return reinterpret_cast<AccessUnit*>(const_cast<uint8_t*>(Data()) + Offset());
+  return Data() == nullptr
+             ? nullptr
+             : reinterpret_cast<AccessUnit*>(const_cast<uint8_t*>(Data()) + Offset());
 }
 
 }  // namespace LibXR

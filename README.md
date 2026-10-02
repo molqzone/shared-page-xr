@@ -31,7 +31,7 @@ if (page.Region().Read(&region) == RegionScan::CURRENT) { /* 用 region.payload 
 // Linux 侧（RazverMaster / Recorder）：订 topic，与 camera_image 同构
 SharedPage page(/* yaml 配置注入的 /dev/mem 非缓存映射 */);
 LibXR::Topic topic(LibXR::Topic::CreateTopic<TelemetryBatch>("telemetry"));
-SharedPageXR::LinuxSharedPage adapter(page, topic);
+LibXR::LinuxSharedPage adapter(page, topic);
 adapter.Poll();                            // 1kHz：drain 新区间并发一组
 ```
 

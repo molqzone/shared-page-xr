@@ -29,9 +29,9 @@
 #include "sample.hpp"
 #include "test_assert.hpp"
 
-using namespace SharedPageXR;
-using SharedPageXRTest::MakeSample;
-using SharedPageXRTest::SameSample;
+using namespace LibXR;
+using LibXRTest::MakeSample;
+using LibXRTest::SameSample;
 
 namespace
 {

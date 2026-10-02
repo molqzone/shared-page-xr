@@ -17,7 +17,7 @@
 
 #include "shared_page.hpp"
 
-namespace SharedPageXRTest
+namespace LibXRTest
 {
 /// @brief 契约里的舵机通道数（第 8 节定稿）。Servo channel count from the settled §8.
 inline constexpr uint32_t SERVO_CHANNELS = 4;
@@ -31,9 +31,9 @@ inline constexpr uint32_t SERVO_CHANNELS = 4;
  * than merely "not zero". The index also fills the four servo words, so a channel-count
  * change shows up here together with the static_assert.
  */
-inline SharedPageXR::Sample MakeSample(uint32_t index)
+inline LibXR::Sample MakeSample(uint32_t index)
 {
-  SharedPageXR::Sample sample = {};
+  LibXR::Sample sample = {};
   sample.ticks = 1000 + index;
   sample.accel[0] = static_cast<int16_t>(100 + index);
   sample.accel[1] = static_cast<int16_t>(-static_cast<int16_t>(index));
@@ -58,9 +58,9 @@ inline SharedPageXR::Sample MakeSample(uint32_t index)
  * Uses `memcmp` rather than field-by-field comparison: the struct's 4B tail padding is
  * part of the contract and a field-wise check would miss it.
  */
-inline bool SameSample(const SharedPageXR::Sample& lhs, const SharedPageXR::Sample& rhs)
+inline bool SameSample(const LibXR::Sample& lhs, const LibXR::Sample& rhs)
 {
-  return std::memcmp(&lhs, &rhs, sizeof(SharedPageXR::Sample)) == 0;
+  return std::memcmp(&lhs, &rhs, sizeof(LibXR::Sample)) == 0;
 }
 
-}  // namespace SharedPageXRTest
+}  // namespace LibXRTest

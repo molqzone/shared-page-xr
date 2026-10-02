@@ -56,7 +56,7 @@
  * than module behaviour.
  */
 
-namespace SharedPageXR
+namespace LibXR
 {
 /**
  * @brief 遥测 topic 的缺省名称。Default name of the telemetry topic.
@@ -308,4 +308,4 @@ class LinuxSharedPage
   uint32_t period_us_ = 1000;   ///< drain 节律（us）。Drain cadence (us).
 };
 
-}  // namespace SharedPageXR
+}  // namespace LibXR

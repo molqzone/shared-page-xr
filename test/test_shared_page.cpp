@@ -34,9 +34,9 @@
 #include "shared_page.hpp"
 #include "test_assert.hpp"
 
-using namespace SharedPageXR;
-using SharedPageXRTest::MakeSample;
-using SharedPageXRTest::SameSample;
+using namespace LibXR;
+using LibXRTest::MakeSample;
+using LibXRTest::SameSample;
 
 namespace
 {
@@ -87,7 +87,7 @@ void TestLayout()
   TEST_ASSERT(offsetof(Sample, servo_target) == 20);
   TEST_ASSERT(offsetof(Sample, pad) == 28);
   TEST_ASSERT(sizeof(Sample::servo_target) ==
-              SharedPageXRTest::SERVO_CHANNELS * sizeof(uint16_t));
+              LibXRTest::SERVO_CHANNELS * sizeof(uint16_t));
 
   // RegionPayload 的字段只占 24B：最后一个 float 结束于 24，ABI 不补尾。而 seq 必须
   // 落在 28，所以那 4B 是 Region 的显式填充。两个数都要钉住。

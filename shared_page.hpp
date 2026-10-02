@@ -34,9 +34,15 @@
  *    rdtime 原始计数。换算只发生在本就要计算的一端（Linux 侧几何解算），满量程
  *    刻度属 action 仓库的 IMU 驱动配置，不焊进本契约。
  * 4. **契约无版本号**：定稿意味着双端同步变更，字段偏移由 `static_assert` 钉死。
+ * 5. **命名空间是 `LibXR`**：本契约是 LibXR 生态里的一层传输（与 `LinuxSharedTopic`
+ *    等同属 libxr 的既有设施），模块写 `LibXR::SharedPage` 即可，不另起一层只放几个
+ *    类型的命名空间。
+ * 5. **The namespace is `LibXR`**: this contract is one transport layer of the LibXR
+ *    ecosystem, alongside facilities such as `LinuxSharedTopic`, so a consumer writes
+ *    `LibXR::SharedPage` instead of a namespace holding a handful of types.
  */
 
-namespace SharedPageXR
+namespace LibXR
 {
 /**
  * @brief 一页的大小：4 KiB，物理邻接分配的最小对齐单位。
@@ -1007,4 +1013,4 @@ inline bool CheckAccessUnitPage(const AccessUnitPage& page)
   return page.Check() == PageMagicKind::FORMATTED;
 }
 
-}  // namespace SharedPageXR
+}  // namespace LibXR

@@ -82,18 +82,21 @@ C606 侧用 `Acquire()` 取。
 
 ## 测试
 
-测试放在**本仓库**的 `test/` 下，与 `libxr/test` 同一组织方式：目录名是被测接口的源
-文件名，检查用 `TEST_ASSERT`（始终生效，不看产品断言开关）。页由匿名映射提供，不需要
+测试放在**本仓库**的 `test/` 下：与被测头同仓（本契约有两个消费者，测试不能只属于其中
+一个），检查用 `TEST_ASSERT`（始终生效，不看产品断言开关）。页由匿名映射提供，不需要
 `/dev/mem`、root 或第二个进程，所以契约在主机上就能验证。
 
 ```text
-test/CMakeLists.txt                       测试目标与 CTest 登记
-test/test_assert.hpp                      始终生效的 TEST_ASSERT（与 libxr 同名同义）
-test/common/sample.hpp                    两个测试共用的 Sample 构造与比较
-test/shared_page/test_shared_page.cpp     页契约与发布索引
-test/linux_shared_page/test_linux_shared_page.cpp
-                                          适配器 + 真实 LibXR Topic
+test/CMakeLists.txt                测试目标与 CTest 登记
+test/test_assert.hpp               始终生效的 TEST_ASSERT（与 libxr 同名同义）
+test/sample.hpp                    两个测试共用的 Sample 构造与比较
+test/test_shared_page.cpp          页契约与发布索引
+test/test_linux_shared_page.cpp    适配器 + 真实 LibXR Topic
 ```
+
+**平铺而不是一个接口一层目录**：本仓库只有两个头、两个测试文件，`libxr/test/automatic`
+那种镜像源码树的层级在这里只是额外跳转。等同一接口长到多个测试文件再拆，那时目录名取
+被测源文件名（比如 `test/shared_page/`）。
 
 测试**默认不构建**（本仓库是 submodule，单独构建时不该带出测试），显式打开：
 
@@ -111,10 +114,10 @@ cmake --preset debug && cmake --build --preset debug
 ctest --test-dir build-host -R "shared_page|linux_shared_page" --output-on-failure
 ```
 
-`test/shared_page`：布局与发布索引——`Sample`/`Region` 的字段偏移与总长、`Latest` /
+`test_shared_page.cpp`：布局与发布索引——`Sample`/`Region` 的字段偏移与总长、`Latest` /
 `Since` 的边界（64 槽余量、gap、新纪元）、region 稳定读与撕裂重试、访问单元页的借还
-语义。`test/linux_shared_page`：驱动真实 LibXR `Topic`——节律门、一组遥测进回调订阅者、
-gap 后重新同步、参考/命令经独立页视图回读。
+语义。`test_linux_shared_page.cpp`：驱动真实 LibXR `Topic`——节律门、一组遥测进回调
+订阅者、gap 后重新同步、参考/命令经独立页视图回读。
 
 ### 已知待办
 

@@ -3,11 +3,11 @@
  * @brief 两个测试共用的 Sample 构造与比较 / Sample builder and comparison shared by
  *        both tests.
  *
- * 放在最近的公共目录（`test/common`），与 `libxr/test/README.md` 的约定一致：只用
- * 一次的辅助留在测试文件里，多个文件共用的放在最近的公共目录。
- * Lives in the nearest common directory (`test/common`), as `libxr/test/README.md`
- * prescribes: single-use helpers stay in the test file, helpers shared by several
- * files go to the nearest common directory.
+ * 两个测试文件共用，所以单独一个头。`libxr/test/README.md` 说「共用辅助放最近的公共
+ * 目录」，在本仓库那就是平铺的 `test/` 本身；只用一次的辅助仍留在各自测试文件里。
+ * Shared by both test files, hence its own header. `libxr/test/README.md` says to put
+ * shared helpers in the nearest common directory, which here is the flat `test/`
+ * itself; single-use helpers still stay inside their own test file.
  */
 
 #pragma once

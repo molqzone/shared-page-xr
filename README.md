@@ -82,14 +82,43 @@ C606 侧用 `Acquire()` 取。
 
 ## 测试
 
-`bsp-guidance-vision` 的主机侧测试（匿名映射，不需要 `/dev/mem` 或 root）：
+测试放在**本仓库**的 `test/` 下，与 `libxr/test` 同一组织方式：目录名是被测接口的源
+文件名，检查用 `TEST_ASSERT`（始终生效，不看产品断言开关）。页由匿名映射提供，不需要
+`/dev/mem`、root 或第二个进程，所以契约在主机上就能验证。
+
+```text
+test/CMakeLists.txt                       测试目标与 CTest 登记
+test/test_assert.hpp                      始终生效的 TEST_ASSERT（与 libxr 同名同义）
+test/common/sample.hpp                    两个测试共用的 Sample 构造与比较
+test/shared_page/test_shared_page.cpp     页契约与发布索引
+test/linux_shared_page/test_linux_shared_page.cpp
+                                          适配器 + 真实 LibXR Topic
+```
+
+测试**默认不构建**（本仓库是 submodule，单独构建时不该带出测试），显式打开：
+
+```bash
+# 单独构建本仓库（需要 libxr；见下方“已知待办”）
+cmake -S . -B build -DSHARED_PAGE_XR_TEST_BUILD=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+消费方在自己开启测试时把该选项打开，例如 `bsp-guidance-vision`：
 
 ```bash
 cmake --preset debug && cmake --build --preset debug
 ctest --test-dir build-host -R "shared_page|linux_shared_page" --output-on-failure
 ```
 
-* `User/shared_page_test.cpp`：只钉页契约与发布索引——布局、`Latest`/`Since` 的边界
-  （64 槽余量、gap、新纪元）、region 撕裂重试、mailbox 借还语义。
-* `User/linux_shared_page_test.cpp`：驱动真实 LibXR `Topic`——一组遥测进回调订阅者、
-  节律早退、gap 后重新同步、参考/命令经独立页视图回读。
+`test/shared_page`：布局与发布索引——`Sample`/`Region` 的字段偏移与总长、`Latest` /
+`Since` 的边界（64 槽余量、gap、新纪元）、region 稳定读与撕裂重试、访问单元页的借还
+语义。`test/linux_shared_page`：驱动真实 LibXR `Topic`——节律门、一组遥测进回调订阅者、
+gap 后重新同步、参考/命令经独立页视图回读。
+
+### 已知待办
+
+`libxr` 尚未作为本仓库的 submodule pin 住（`.gitmodules` 里没有它），所以「单独构建
+本仓库」目前要求旁边已有一份 libxr，或在 `bsp-guidance-vision` 里构建。补上后单独
+`git clone --recursive` 即可自带测试依赖。
+

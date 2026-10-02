@@ -31,6 +31,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "crc.hpp"
 #include "sample.hpp"
 #include "shared_page.hpp"
 #include "test_assert.hpp"

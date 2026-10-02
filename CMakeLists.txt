@@ -13,18 +13,19 @@ endif()
 # as libcvimpp and deliberately not an xrobot Module (no MANIFEST, no
 # User/xrobot.yaml entry, never constructed by xrobot_gen_main).
 #
-# INTERFACE target：无平台分支，`LIBXR_SYSTEM` 不出场。页契约本身平台中性
-# （`shared_page.hpp`，C606 直接用），Linux 侧的 Topic 适配是
-# `linux_shared_page.hpp`，只依赖 LibXR 的 `Topic`。
-# INTERFACE target: no platform branch and no `LIBXR_SYSTEM` involvement. The page
-# contract itself is platform neutral (`shared_page.hpp`, used directly by C606)
-# and the Linux-side topic adapter is `linux_shared_page.hpp`, which only depends
-# on the LibXR `Topic`.
+# STATIC target（与 libxr 的默认一致）：实现放在 .cpp 里，头文件只有契约与声明。无平台
+# 分支，`LIBXR_SYSTEM` 不出场。页契约本身平台中性（`shared_page.hpp`，C606 直接用），
+# Linux 侧的 Topic 适配是 `linux_shared_page.hpp`，只依赖 LibXR 的 `Topic`。
+# STATIC target, matching the LibXR default: implementations live in the .cpp files and
+# the headers hold only the contract and the declarations. No platform branch and no
+# `LIBXR_SYSTEM` involvement. The page contract itself is platform neutral
+# (`shared_page.hpp`, used directly by C606) and the Linux-side topic adapter is
+# `linux_shared_page.hpp`, which only depends on the LibXR `Topic`.
 if(NOT TARGET shared_page_xr)
-  add_library(shared_page_xr INTERFACE)
-  target_include_directories(shared_page_xr INTERFACE ${CMAKE_CURRENT_LIST_DIR})
-  target_compile_features(shared_page_xr INTERFACE cxx_std_20)
-  target_link_libraries(shared_page_xr INTERFACE xr)
+  add_library(shared_page_xr STATIC shared_page.cpp linux_shared_page.cpp)
+  target_include_directories(shared_page_xr PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+  target_compile_features(shared_page_xr PUBLIC cxx_std_20)
+  target_link_libraries(shared_page_xr PUBLIC xr)
 endif()
 
 # 单独构建本仓库时（`cmake -S shared-page-xr -B build -DSHARED_PAGE_XR_TEST_BUILD=ON`）

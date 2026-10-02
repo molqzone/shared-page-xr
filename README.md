@@ -12,12 +12,16 @@ SG2002 大小核（C606L Linux ↔ C606 RTOS）共享页传输。页是传输，
 ## 组成
 
 ```text
-shared_page.hpp        SharedPage：页契约（Sample / Region / AccessUnit）+ 发布索引
-                       + Latest() / Since() / Region() / Acquire()
-                       C606 控制环直接用
-linux_shared_page.hpp  LinuxSharedPage：drain 遥测区间 → Topic 广播；写参考区
-CMakeLists.txt         INTERFACE target shared_page_xr，链接 libxr，无平台分支
+shared_page.hpp / .cpp        页契约（Sample / Region / AccessUnit）+ 发布索引 +
+                              Latest() / Since() / Region() / Acquire()。
+                              C606 控制环直接用
+linux_shared_page.hpp / .cpp  LinuxSharedPage：drain 遥测区间 → Topic 广播；写参考区
+CMakeLists.txt                STATIC target shared_page_xr，链接 libxr，无平台分支
 ```
+
+声明与实现分开（与 libxr 的 `topic.hpp` / `topic.cpp` 同一做法）：`.hpp` 只有 POD 契约、
+`static_assert` 与类声明，`linux_shared_page.cpp` 里才出现 `Topic` / `Timebase` 的实现细节。
+好处不只是整洁——`.hpp` 因此不再间接拉进 `crc.hpp` 及其 `<cstdio>`，C606 侧只编译契约。
 
 两侧的代码形状各自最自然：
 
@@ -83,7 +87,7 @@ CRC32 用 libxr 既有的 `LibXR::CRC32`（`libxr/src/utils/crc.hpp`），不在
   是廉价操作，改已有字段偏移不是。
 * 页地址不进模块构造参数：Linux 侧经 yaml 配置注入，C606 侧由链接脚本分配。
 * `linux_shared_page.hpp` 是唯一依赖 LibXR `Topic` 的部分；`shared_page.hpp` 只依赖
-  `libxr_def.hpp` 的 `ASSERT`，C606 侧可单独使用。
+  `libxr_def.hpp` 的 `ASSERT`，C606 侧可单独使用。两者都需要编译本仓库的 `.cpp`。
 
 ## 测试
 

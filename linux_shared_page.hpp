@@ -1,12 +1,9 @@
 #pragma once
 
-#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
-#include "libxr_time.hpp"
 #include "shared_page.hpp"
-#include "timebase.hpp"
 #include "topic.hpp"
 
 /**
@@ -91,18 +88,17 @@ struct LinuxSharedPageConfig
   const char* domain_name = SHARED_PAGE_DOMAIN_NAME;  ///< topic 域名称。Topic domain
                                                       ///< name.
 };
-
 /**
  * @class LinuxSharedPage
  * @brief Linux 侧的共享页：drain 遥测区间并发 topic，写参考区。
- *        Linux-side shared page: drain the telemetry range into a topic and write
- *        the reference region.
+ *        Linux-side shared page: drain the telemetry range into a topic and write the
+ *        reference region.
  *
  * 不拥有页内存，也不拥有 topic：两者都由初始化代码构造后注入，与 `LinuxSharedTopic`
  * 由调用者持有句柄一致。
- * It owns neither the page memory nor the topic: both are constructed by
- * initialisation code and injected here, matching how a `LinuxSharedTopic` handle is
- * owned by its caller.
+ * It owns neither the page memory nor the topic: both are constructed by initialisation
+ * code and injected here, matching how a `LinuxSharedTopic` handle is owned by its
+ * caller.
  */
 class LinuxSharedPage
 {
@@ -110,22 +106,12 @@ class LinuxSharedPage
   /**
    * @brief 绑定页与 topic。Bind the page and the topic.
    * @param page 已映射的页视图。Already-mapped page view.
-   * @param topic 遥测 topic（payload 为 `TelemetryBatch`）。Telemetry topic whose
-   *              payload is `TelemetryBatch`.
+   * @param topic 遥测 topic（payload 为 `TelemetryBatch`）。Telemetry topic whose payload
+   *              is `TelemetryBatch`.
    * @param config 创建配置。Creation config.
    */
   LinuxSharedPage(SharedPage page, LibXR::Topic topic,
-                  const LinuxSharedPageConfig& config = {})
-      : page_(page), topic_(topic), period_us_(config.drain_period_us)
-  {
-    // 不在这里读时钟：`last_drain_us_ = 0` 让第一次 `Poll()` 确立节律基准，也避免与
-    // 调用者注入的时钟（测试）互相干扰。此时页上已有的待发布区间会在第一次 `Poll()`
-    // 发出，这正是启动时该有的行为。
-    // No clock is read here: `last_drain_us_ = 0` makes the first `Poll()` establish the
-    // cadence baseline and keeps a caller-injected clock (tests) independent. A range
-    // already waiting on the page is published by that first `Poll()`, which is what
-    // startup should do.
-  }
+                  const LinuxSharedPageConfig& config = {});
 
   LinuxSharedPage(const LinuxSharedPage&) = delete;
   LinuxSharedPage& operator=(const LinuxSharedPage&) = delete;
@@ -134,48 +120,25 @@ class LinuxSharedPage
    * @brief 页是否处在可用状态（已绑定且魔术字正确）。
    *        Whether the page is usable (bound and the magic matches).
    */
-  [[nodiscard]] bool Ready() const { return page_.Ready(); }
+  [[nodiscard]] bool Ready() const;
 
   /**
    * @brief 参考/命令区视图（供写 aim 与参数）。Reference/command view (for writing the
-   *        aim and parameters).
+   * aim and parameters).
    */
-  [[nodiscard]] Reference Region() { return page_.Region(); }
+  [[nodiscard]] Reference Region();
 
   /**
    * @brief 按节律 drain 一次（正常路径每周期调用一次）。Drain once when the cadence is
    *        due, which the normal path calls every cycle.
    *
-   * 未到节律时不发布，直接返回。
-   * Nothing is published when the cadence is not due.
+   * 未到节律时不发布。Nothing is published when the cadence is not due.
    *
    * @param now_us 当前时间（us）；缺省由内部读取，测试可注入。Current time in
    *               microseconds; read internally by default and injectable for tests.
    * @return 本次发布了遥测返回 `true`。`true` when a batch was published.
    */
-  bool Poll(uint64_t now_us = UINT64_MAX)
-  {
-    if (now_us == UINT64_MAX)
-    {
-      now_us = static_cast<uint64_t>(LibXR::Timebase::GetMicroseconds());
-    }
-
-    if (now_us - last_drain_us_ < period_us_)
-    {
-      return false;
-    }
-    last_drain_us_ = now_us;
-
-    TelemetryBatch batch = {};
-    if (Drain(&batch) == 0 && batch.gap == 0)
-    {
-      return false;
-    }
-
-    LibXR::MicrosecondTimestamp timestamp(now_us);
-    topic_.Publish(batch, timestamp);
-    return true;
-  }
+  bool Poll(uint64_t now_us = UINT64_MAX);
 
   /**
    * @brief 立即 drain 并填充一组，不发布（测试与 `RazverMaster` 组 metadata 用）。
@@ -184,39 +147,9 @@ class LinuxSharedPage
    *
    * @param batch 输出：本组遥测。Output: this telemetry batch.
    * @return 本组采样条数，0 表示无新数据。Sample count of this batch; 0 means no new
-   *         data).
+   * data.
    */
-  uint32_t Drain(TelemetryBatch* batch)
-  {
-    ASSERT(batch != nullptr);
-    *batch = {};
-
-    if (!page_.Ready())
-    {
-      return 0;
-    }
-
-    auto reader = page_.TelemetryReader();
-
-    RingScan scan = RingScan::DATA;
-    uint32_t next = 0;
-    const uint32_t count =
-        reader.Since(last_seen_, &scan, &next, batch->ring, TELEMETRY_SLOTS);
-    last_seen_ = next;
-
-    if (scan == RingScan::GAP)
-    {
-      // 整段被覆写：不发采样，只标记缺失区间。
-      // The whole range was overwritten: emit no samples, only the missing interval.
-      batch->gap = 1;
-      batch->head = next;
-      return 0;
-    }
-
-    batch->count = count;
-    batch->head = next;
-    return count;
-  }
+  uint32_t Drain(TelemetryBatch* batch);
 
   /**
    * @brief 写一帧视觉参考。Write one frame of visual reference.
@@ -225,36 +158,26 @@ class LinuxSharedPage
    * @param aim_y 归一化中心 y。Normalised centre y.
    * @return 写入后的 `seq`。The resulting `seq`.
    */
-  uint32_t WriteAim(bool found, float aim_x, float aim_y)
-  {
-    return page_.Region().WriteAim(found, aim_x, aim_y);
-  }
+  uint32_t WriteAim(bool found, float aim_x, float aim_y);
 
   /**
    * @brief 写一个参数下行命令（已过大核白名单过滤）。
-   *        Write one parameter-downlink command (already whitelist-filtered on the
-   *        big core).
+   *        Write one parameter-downlink command (already whitelist-filtered on the big
+   *        core).
    *
    * @param param_id C606 侧参数表索引。Parameter-table index on the C606 side.
-   * @param value 参数值；≤2^24 的整数在 f32 上精确。Parameter value; integers up to
-   *              2^24 are exact in f32.
+   * @param value 参数值；≤2^24 的整数在 f32 上精确。Parameter value; integers up to 2^24
+   *              are exact in f32.
    * @param cmd 命令字，缺省 `CMD_PARAM`。Command code, `CMD_PARAM` by default.
    * @return 写入后的 `seq`。The resulting `seq`.
    */
-  uint32_t WriteParam(uint16_t param_id, float value, uint8_t cmd = Region::CMD_PARAM)
-  {
-    RegionPayload payload = {};
-    payload.cmd = cmd;
-    payload.param_id = param_id;
-    payload.value = value;
-    return page_.Region().Write(payload);
-  }
+  uint32_t WriteParam(uint16_t param_id, float value, uint8_t cmd = Region::CMD_PARAM);
 
   /**
    * @brief 本适配器已消费到的发布索引（订阅者的 `last_seen`）。Publish index this adapter
    *        has consumed, the subscriber-side `last_seen`.
    */
-  [[nodiscard]] uint32_t LastSeen() const { return last_seen_; }
+  [[nodiscard]] uint32_t LastSeen() const;
 
  private:
   SharedPage page_;             ///< 已映射的页。Already-mapped page.

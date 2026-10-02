@@ -338,8 +338,7 @@ void TestAccessUnit()
   mailbox.Format();
   TEST_ASSERT(mailbox.Check() == PageMagicKind::FORMATTED);
 
-  uint32_t crc = 0;
-  TEST_ASSERT(!mailbox.Acquire(&crc).Valid());
+  TEST_ASSERT(!mailbox.Acquire().Valid());
 
   std::array<uint8_t, 64> frame = {};
   for (uint32_t index = 0; index < frame.size(); ++index)
@@ -347,19 +346,23 @@ void TestAccessUnit()
     frame[index] = static_cast<uint8_t>(index);
   }
 
-  TEST_ASSERT(mailbox.Publish(frame.data(), 48, AccessUnit::FORMAT_H264_ANNEX_B, 640, 480,
-                              0xCAFEBABEU) == 1);
+  TEST_ASSERT(
+      mailbox.Publish(frame.data(), 48, AccessUnit::FORMAT_H264_ANNEX_B, 640, 480) == 1);
 
   const uint32_t length = 48;
-  const auto view = mailbox.Acquire(&crc);
+  const auto view = mailbox.Acquire(true);
   TEST_ASSERT(view.Valid());
   TEST_ASSERT(view.length == length);
   TEST_ASSERT(view.format == AccessUnit::FORMAT_H264_ANNEX_B);
   TEST_ASSERT(view.width == 640);
   TEST_ASSERT(view.height == 480);
   TEST_ASSERT(view.seq == 1);
-  TEST_ASSERT(crc == 0xCAFEBABEU);
   TEST_ASSERT(std::memcmp(view.data, frame.data(), length) == 0);
+
+  // Publish() 用 LibXR::CRC32 写入校验值，页内保存的就是该算法的结果。
+  // Publish() stores the LibXR::CRC32 result, so the page holds that algorithm's value.
+  const auto* slot = reinterpret_cast<const AccessUnit*>(memory);
+  TEST_ASSERT(slot->crc32.load() == CRC32::Calculate(frame.data(), length));
 
   // 借出一次即清 ready：同一帧不会被消费两次。
   // One take clears ready, so one frame is consumed once.
@@ -370,12 +373,35 @@ void TestAccessUnit()
   frame[0] = 0xAB;
   TEST_ASSERT(
       mailbox.Publish(frame.data(), 16, AccessUnit::FORMAT_H264_ANNEX_B, 320, 240) == 2);
-  const auto second = mailbox.Acquire();
+  const auto second = mailbox.Acquire(true);
   TEST_ASSERT(second.Valid());
   TEST_ASSERT(second.seq == 2);
   TEST_ASSERT(second.length == 16);
   TEST_ASSERT(second.width == 320);
   TEST_ASSERT(second.data[0] == 0xAB);
+
+  // 校验失败：把页内 payload 改坏，取帧必须拒绝，且 ready 保持置位以便重试。
+  // A failed check: corrupting the in-page payload must be rejected, with `ready` left
+  // set so the caller can retry.
+  TEST_ASSERT(
+      mailbox.Publish(frame.data(), 16, AccessUnit::FORMAT_H264_ANNEX_B, 320, 240) == 3);
+  auto* corrupt = reinterpret_cast<AccessUnit*>(memory);
+  corrupt->payload[0] ^= 0xFFU;
+  TEST_ASSERT(!mailbox.Acquire(true).Valid());
+  TEST_ASSERT(corrupt->ready.load() == 1);
+
+  // 关掉校验时不复算，取帧照常成功（热路径）。
+  // With the check off nothing is recomputed and the take succeeds, which is the hot
+  // path.
+  const auto unchecked = mailbox.Acquire(false);
+  TEST_ASSERT(unchecked.Valid());
+  TEST_ASSERT(unchecked.seq == 3);
+
+  // 计算 CRC32 不是强制的：关掉时页内记 0，表示未计算。
+  // Computing the CRC32 is optional: turned off, the page records 0 for "not computed".
+  TEST_ASSERT(mailbox.Publish(frame.data(), 16, AccessUnit::FORMAT_H264_ANNEX_B, 320, 240,
+                              false) == 4);
+  TEST_ASSERT(corrupt->crc32.load() == 0);
 
   // 越界与空指针被拒绝，而不是截断。
   // Oversized and null publishes are rejected, not truncated.
@@ -385,15 +411,14 @@ void TestAccessUnit()
   // 正好到上界的发布被接受（边界是 `> MAX`）。
   // A publish exactly at the limit is accepted: the bound is `> MAX`.
   std::vector<uint8_t> full_frame(AccessUnit::MAX_BYTES, 0x5AU);
-  TEST_ASSERT(mailbox.Publish(full_frame.data(), AccessUnit::MAX_BYTES, 1, 2, 3) == 3);
-  const auto full = mailbox.Acquire();
+  TEST_ASSERT(mailbox.Publish(full_frame.data(), AccessUnit::MAX_BYTES, 1, 2, 3) == 5);
+  const auto full = mailbox.Acquire(true);
   TEST_ASSERT(full.Valid());
   TEST_ASSERT(full.length == AccessUnit::MAX_BYTES);
   TEST_ASSERT(full.data[AccessUnit::MAX_BYTES - 1] == 0x5AU);
 
   // 头部在页首，payload 紧随其后。
   // The header occupies the start of the page and the payload follows it.
-  const auto* slot = reinterpret_cast<const AccessUnit*>(memory);
   TEST_ASSERT(slot->magic == ACCESS_UNIT_MAGIC);
   TEST_ASSERT(reinterpret_cast<const uint8_t*>(slot->payload) ==
               memory + offsetof(AccessUnit, payload));

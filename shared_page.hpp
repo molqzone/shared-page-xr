@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include "crc.hpp"
 #include "libxr_def.hpp"
 
 /**
@@ -222,9 +223,9 @@ struct AccessUnit
                                  ///< more than `MAILBOX_BYTES`.
   std::atomic<uint32_t> ready;   ///< 1 = 有新帧可取；读者取走后置 0。1 = a frame is
                                  ///< available; cleared by the reader.
-  std::atomic<uint32_t> crc32;   ///< payload CRC32（0 = 未校验）。CRC32 of the payload
-                                 ///< (0 = unchecked).
-  uint32_t reserved;             ///< 对齐与后续扩展留白。Alignment and future use.
+  std::atomic<uint32_t> crc32;  ///< payload 的 `LibXR::CRC32`（0 = 未计算）。CRC32 of the
+                                ///< payload (0 = not computed).
+  uint32_t reserved;            ///< 对齐与后续扩展留白。Alignment and future use.
   uint8_t payload[MAILBOX_BYTES];  ///< 访问单元字节。Access-unit bytes.
 
   /// @brief 单帧最大字节数。Maximum bytes of one frame.
@@ -836,18 +837,26 @@ class AccessUnitPage : public PageBase
    *        Publish one access unit, called on the camera side while the VENC buffer is
    *        held.
    *
+   * CRC32 由本函数用 `LibXR::CRC32` 算出并写入页内，不由调用者传入：契约里不再存在
+   * 「写了校验值但没有人验证」的数据。
+   * The CRC32 is computed here with `LibXR::CRC32` and stored in the page rather than
+   * passed in by the caller, so the contract no longer carries a checksum nobody
+   * verifies.
+   *
    * @param data 访问单元字节。Access-unit bytes.
    * @param length 字节数，不超过 `MAILBOX_BYTES`。Byte count, no more than
    *               `MAILBOX_BYTES`.
    * @param format 编码格式。Encoding format.
    * @param width 帧宽。Frame width.
    * @param height 帧高。Frame height.
-   * @param crc32 payload CRC32，0 表示不校验。Payload CRC32; 0 means unchecked.
+   * @param compute_crc32 是否计算 CRC32；整帧扫描不是免费的，可关闭。
+   *                      Whether to compute the CRC32; the full-frame pass is not free
+   *                      and can be turned off.
    * @return 写入后的 `seq`；越界、空指针或未绑定时为 0。The resulting `seq`; 0 when
    *         oversized, null or unbound.
    */
   uint32_t Publish(const void* data, uint32_t length, uint32_t format, uint32_t width,
-                   uint32_t height, uint32_t crc32 = 0)
+                   uint32_t height, bool compute_crc32 = true)
   {
     if (Data() == nullptr || data == nullptr || length > AccessUnit::MAX_BYTES)
     {
@@ -859,7 +868,8 @@ class AccessUnitPage : public PageBase
     slot->format = format;
     slot->width = width;
     slot->height = height;
-    slot->crc32.store(crc32, std::memory_order_relaxed);
+    slot->crc32.store(compute_crc32 ? CRC32::Calculate(data, length) : 0,
+                      std::memory_order_relaxed);
     slot->length.store(length, std::memory_order_relaxed);
     slot->ready.store(1, std::memory_order_relaxed);
 
@@ -881,12 +891,19 @@ class AccessUnitPage : public PageBase
    * `Publish()`; `ready` is already cleared, so the caller should consume the frame
    * promptly (copy or encode).
    *
-   * @param crc32 输出：本帧 payload CRC32。Output: payload CRC32 of this frame.
+   * `verify_crc32` 为真时用 `LibXR::CRC32` 复算校验值，不匹配则返回空视图并保留
+   * `ready`（帧仍在槽里，调用者可重试）。整帧扫描不是免费的，热路径可关闭。
+   * With `verify_crc32` the checksum is recomputed through `LibXR::CRC32` and a mismatch
+   * returns an empty view with `ready` left set, so the frame stays available to retry.
+   * The full-frame pass is not free and can be turned off on a hot path.
+   *
+   * @param verify_crc32 是否复算并校验 CRC32。Whether to recompute and check the CRC32.
    * @param retries 撕裂重试上限。Tear-retry limit.
-   * @return 未绑定、无新帧或撕裂未消除时返回空视图。An empty view when unbound, no frame
-   *         is ready, or a tear could not be resolved.
+   * @return 未绑定、无新帧、撕裂未消除或校验失败时返回空视图。An empty view when
+   *         unbound, no frame is ready, a tear could not be resolved, or the checksum
+   *         failed.
    */
-  [[nodiscard]] View Acquire(uint32_t* crc32 = nullptr, uint32_t retries = 8)
+  [[nodiscard]] View Acquire(bool verify_crc32 = false, uint32_t retries = 8)
   {
     View view = {};
     if (Data() == nullptr)
@@ -917,11 +934,17 @@ class AccessUnitPage : public PageBase
         view.width = slot->width;
         view.height = slot->height;
         view.seq = before;
-        slot->ready.store(0, std::memory_order_release);
-        if (crc32 != nullptr)
+
+        // 校验失败不动 ready：该帧留待重试，而不是被当成已消费。
+        // A failed check leaves `ready` set, so the frame can be retried instead of
+        // counting as consumed.
+        const uint32_t stored = slot->crc32.load(std::memory_order_relaxed);
+        if (verify_crc32 && stored != 0 && CRC32::Calculate(view.data, length) != stored)
         {
-          *crc32 = slot->crc32.load(std::memory_order_relaxed);
+          return View{};
         }
+
+        slot->ready.store(0, std::memory_order_release);
         return view;
       }
     }

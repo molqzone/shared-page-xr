@@ -72,6 +72,11 @@ bump `seq`；`Acquire()` acquire 比对后返回只读视图并清 `ready`，读
 覆写旧帧（丢帧而不阻塞），与 keep-latest 订阅一致。Linux 侧的自留缓冲区按此发布，
 C606 侧用 `Acquire()` 取。
 
+CRC32 用 libxr 既有的 `LibXR::CRC32`（`libxr/src/utils/crc.hpp`），不在契约里另写一份
+校验算法：`Publish()` 自己算出校验值写进页内（`compute_crc32 = false` 可关闭，那是
+一次整帧扫描），`Acquire(true)` 复算比对，不匹配时返回空视图并保留 `ready` 供重试。
+两端共用同一实现，双核才会对同一个字节流得到同一个值。
+
 ## 约束
 
 * `static_assert` 把字段偏移与总长钉死。**契约无版本号**：变更双端同步，加字段永远

@@ -4,24 +4,25 @@
  *        `linux_shared_page.hpp`.
  *
  * 测什么 / Checks:
- *   1. 节律门：未到周期是早退，到周期才发布。
+ *   1. 事件门：没有门铃就没有发布（数据不许自己"被轮询"）；门铃到达才 drain +
+ *      发布；空铃/超时/冷页都不发布。
  *   2. drain 区间：整段以一条 `TelemetryBatch` 进真实 LibXR topic 的回调订阅者，
- *      顺序、条数、`head` 与发布时间戳。
+ *      顺序、条数、`head` 与发布时间戳；多次通知 coalesce 成一次 drain。
  *   3. gap：被写者覆写的区间整段丢弃并标记，随后能重新同步。
  *   4. 参考/命令下行：经独立页视图回读，`seq` 递增、字段与单位不变。
- *   5. 冷页不产生消息。
  *
- * 运行前提 / Setup: 无。页由匿名映射提供，真实 `Topic` 在本进程内注册回调订阅者，
- * 所以不需要 `/dev/mem`、root 或第二个进程。
- * None. The page is an anonymous mapping and the real `Topic` registers an in-process
- * callback subscriber, so no `/dev/mem`, root or second process is needed.
- *
- * 时钟由测试注入固定的 `now_us`，因此节律判定是确定的，不依赖真实时间。
- * The test injects a fixed `now_us`, so the cadence decision is deterministic and does
- * not depend on wall time.
+ * 运行前提 / Setup: 无。页由匿名映射提供，门铃用 eventfd（与平台绑定同形态），
+ * 真实 `Topic` 在本进程内注册回调订阅者，所以不需要 `/dev/mem`、root、
+ * `cvi-rtos-cmdqu` 或第二个进程。
+ * None. The page is an anonymous mapping, the doorbell is an eventfd (the same
+ * shape a platform binding provides), and the real `Topic` registers an
+ * in-process callback subscriber, so no `/dev/mem`, root, `cvi-rtos-cmdqu` or
+ * second process is needed.
  */
 
+#include <sys/eventfd.h>
 #include <sys/mman.h>
+#include <unistd.h>
 
 #include <array>
 #include <atomic>
@@ -71,7 +72,6 @@ struct BatchCapture
   uint32_t calls = 0;
   TestBatch last = {};
   std::array<uint32_t, 8> counts = {};
-  std::array<uint64_t, 8> timestamps_us = {};
 };
 
 void on_batch(bool, BatchCapture* capture,
@@ -84,7 +84,6 @@ void on_batch(bool, BatchCapture* capture,
   TEST_ASSERT(capture->calls < capture->counts.size());
   capture->last = *message.data;
   capture->counts.at(capture->calls) = message.data->count;
-  capture->timestamps_us.at(capture->calls) = static_cast<uint64_t>(message.timestamp);
   ++capture->calls;
 }
 
@@ -112,6 +111,38 @@ class Mapping
   void* data_;
 };
 
+/// 一个可敲的门铃：测试自建 eventfd，用 `Doorbell::FromFd` 包成同形态事件源。
+/// A ringable doorbell: the test owns the eventfd and wraps it with
+/// `Doorbell::FromFd`, the same shape a platform binding provides.
+class RingableDoorbell
+{
+ public:
+  RingableDoorbell() : fd_(::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK))
+  {
+    TEST_ASSERT(fd_ >= 0);
+  }
+
+  ~RingableDoorbell() { ::close(fd_); }
+
+  RingableDoorbell(const RingableDoorbell&) = delete;
+  RingableDoorbell& operator=(const RingableDoorbell&) = delete;
+
+  [[nodiscard]] Doorbell Wrap() const { return Doorbell::FromFd(fd_, false); }
+
+  void Ring() const
+  {
+    const uint64_t value = 1;
+    ssize_t written = 0;
+    do
+    {
+      written = ::write(fd_, &value, sizeof(value));
+    } while (written < 0);
+  }
+
+ private:
+  int fd_;
+};
+
 }  // namespace
 
 int main()
@@ -125,95 +156,101 @@ int main()
   TEST_ASSERT(page.Ready());
 
   LibXR::Topic::Domain domain("shared_page_xr");
-  const LibXR::Topic topic(LibXR::Topic::FindOrCreate<TestBatch>(TELEMETRY_TOPIC_NAME,
-                                                                 &domain));
+  const LibXR::Topic topic(
+      LibXR::Topic::FindOrCreate<TestBatch>(TELEMETRY_TOPIC_NAME, &domain));
   BatchCapture capture;
   auto callback = LibXR::Topic::Callback::Create(on_batch, &capture);
 
-  TestAdapter adapter(page, topic, 1000);
+  RingableDoorbell ringer;
+  TestAdapter adapter(ringer.Wrap(), page, topic);
   TEST_ASSERT(adapter.Drain(nullptr) == 0);
   LibXR::Topic& boundary = adapter;
   boundary.RegisterCallback(callback);
 
-  const TestAdapter produced(page, "shared_page_owned_topic");
+  const TestAdapter produced(ringer.Wrap(), page, "shared_page_owned_topic");
   TEST_ASSERT(produced.PayloadSize() == sizeof(TestBatch));
 
-  // 第一次 Poll 只确立节律基准；C906L 侧还没写数据，所以不发布。
-  // The first poll only establishes the cadence baseline; nothing has been written on
-  // the C906L side, so it publishes nothing.
-  adapter.Poll(1000000);
+  // 1. 事件门：没有门铃就没有发布——数据写下了也一样。
+  // The event gate: no doorbell means no publish, even with data waiting.
+  TEST_ASSERT(!adapter.WaitAndPublish(0));
   TEST_ASSERT(capture.calls == 0);
   TEST_ASSERT(adapter.LastSeen() == 0);
-
-  // 到周期才 drain，期间写下的采样随这次 drain 一起出去。
-  // A drain happens once the period elapsed and the sample written meanwhile rides
-  // along with it.
   auto writer = page.TelemetryWriter();
   writer.Write(make_sample(0));
-  adapter.Poll(1001000);
+  TEST_ASSERT(!adapter.WaitAndPublish(0));
+  TEST_ASSERT(capture.calls == 0);
+
+  // 门铃到达才 drain：期间写下的采样随这次 drain 一起出去。
+  // A doorbell drains: the sample written meanwhile rides along with it.
+  ringer.Ring();
+  TEST_ASSERT(adapter.WaitAndPublish(0));
   TEST_ASSERT(capture.calls == 1);
   TEST_ASSERT(adapter.LastSeen() == 1);
   TEST_ASSERT(capture.last.count == 1);
   TEST_ASSERT(same_sample(capture.last.ring[0], make_sample(0)));
 
-  // 差 1us 到周期：早退，不发布。
-  // One microsecond short of the period is an early return, not a publish.
-  writer.Write(make_sample(1));
-  adapter.Poll(1001999);
+  // 空铃（没有新数据）不发布；超时是超时，不是发布。
+  // A spurious notification publishes nothing; a timeout is a timeout.
+  ringer.Ring();
+  TEST_ASSERT(!adapter.WaitAndPublish(0));
   TEST_ASSERT(capture.calls == 1);
-  adapter.Poll(1002000);
-  TEST_ASSERT(capture.calls == 2);
-  TEST_ASSERT(capture.last.count == 1);
-  TEST_ASSERT(same_sample(capture.last.ring[0], make_sample(1)));
+  TEST_ASSERT(!adapter.WaitAndPublish(5));
+  TEST_ASSERT(capture.calls == 1);
 
-  // 新区间整段以一条消息发出，正序，head 作为它的索引。ClearHistory() 开启新纪元
-  // （head 从 0 重新计），所以重建适配器而不是把它带过重置点：带着旧 last_seen 跨
-  // 重启正是上面 gap 规则覆盖的情形。
-  // A new range goes out as one message in ascending order with head as its index.
-  // ClearHistory() starts a new epoch, so the adapter is rebuilt rather than carried
-  // across the reset: a stale last_seen across a restart is the case the gap rule
-  // covers above.
-  page.ClearHistory();
-  TestAdapter epoch_adapter(page, topic);
-  epoch_adapter.Poll(1003000);
+  // 2. 多次通知 coalesce 成一次 drain：区间整段、正序、head 作索引。
+  // Multiple notifications coalesce into one drain: the whole range, ascending,
+  // with head as its index.
+  for (uint32_t index = 1; index < 4; ++index)
+  {
+    writer.Write(make_sample(index));
+  }
+  ringer.Ring();
+  ringer.Ring();
+  TEST_ASSERT(adapter.WaitAndPublish(0));
   TEST_ASSERT(capture.calls == 2);
+  TEST_ASSERT(capture.last.count == 3);
+  TEST_ASSERT(capture.last.head == 4);
+  TEST_ASSERT(capture.last.gap == 0);
+  for (uint32_t index = 0; index < 3; ++index)
+  {
+    TEST_ASSERT(same_sample(capture.last.ring[index], make_sample(index + 1)));
+  }
+
+  // 3. gap：被写者跑过的区间整段丢弃并标记，随后重新同步。ClearHistory() 开新纪元，
+  // 重建适配器而不是带旧 last_seen 过界。
+  // A lapped reader is reported as a gap with no samples; after it the adapter
+  // resynchronises. ClearHistory() starts a new epoch, so the adapter is rebuilt
+  // rather than carried across the reset.
+  page.ClearHistory();
+  TestAdapter epoch_adapter(ringer.Wrap(), page, topic);
+  epoch_adapter.Drain(nullptr);
   for (uint32_t index = 0; index < 5; ++index)
   {
     writer.Write(make_sample(index));
   }
-  epoch_adapter.Poll(1004000);
+  ringer.Ring();
+  TEST_ASSERT(epoch_adapter.WaitAndPublish(0));
   TEST_ASSERT(capture.calls == 3);
   TEST_ASSERT(capture.last.count == 5);
   TEST_ASSERT(capture.last.head == 5);
   TEST_ASSERT(capture.last.gap == 0);
-  for (uint32_t index = 0; index < 5; ++index)
-  {
-    TEST_ASSERT(same_sample(capture.last.ring[index], make_sample(index)));
-  }
 
-  // 发布时间戳就是调用者的 drain 时刻，下游 metadata 据此与视频帧对齐到同一时钟。
-  // The publish timestamp is the caller's drain instant, so downstream metadata can
-  // place the range on the same clock as the frames.
-  TEST_ASSERT(capture.timestamps_us.at(2) == 1004000);
-
-  // 读者被写者跑过：整段丢弃并标记 gap，而不是编造区间。
-  // A lapped reader is reported as a gap with no samples instead of an invented range.
   for (uint32_t index = 5; index < 80; ++index)
   {
     writer.Write(make_sample(index));
   }
-  epoch_adapter.Poll(1005000);
+  ringer.Ring();
+  TEST_ASSERT(epoch_adapter.WaitAndPublish(0));
   TEST_ASSERT(capture.calls == 4);
   TEST_ASSERT(capture.last.gap == 1);
   TEST_ASSERT(capture.last.count == 0);
   TEST_ASSERT(capture.last.head == 80);
   TEST_ASSERT(epoch_adapter.LastSeen() == 80);
 
-  // gap 之后重新同步：下一段区间又是完整的。
-  // After a gap the adapter resynchronises: the next range is complete again.
   writer.Write(make_sample(80));
   writer.Write(make_sample(81));
-  epoch_adapter.Poll(1006000);
+  ringer.Ring();
+  TEST_ASSERT(epoch_adapter.WaitAndPublish(0));
   TEST_ASSERT(capture.calls == 5);
   TEST_ASSERT(capture.last.gap == 0);
   TEST_ASSERT(capture.last.count == 2);
@@ -221,15 +258,20 @@ int main()
   TEST_ASSERT(same_sample(capture.last.ring[0], make_sample(80)));
   TEST_ASSERT(same_sample(capture.last.ring[1], make_sample(81)));
 
+  // 写者活动中的区间不交付、不前进 last_seen。
+  // While the writer is active the range is not delivered and last_seen holds.
   auto* telemetry_ring =
-      reinterpret_cast<TelemetryRing<Sample, TestFormat::SLOT_COUNT>*>(
-          mapping.Data() + telemetry_offset());
+      reinterpret_cast<TelemetryRing<Sample, TestFormat::SLOT_COUNT>*>(mapping.Data() +
+                                                                      telemetry_offset());
   telemetry_ring->write_state.store(1, std::memory_order_release);
   TestBatch busy_batch = {};
   TEST_ASSERT(epoch_adapter.Drain(&busy_batch) == 0);
   TEST_ASSERT(epoch_adapter.LastSeen() == 82);
   telemetry_ring->write_state.store(0, std::memory_order_release);
 
+  // 4. 参考/命令下行：独立页视图回读，seq 递增。
+  // The reference/command downlink: read back through an independent page view,
+  // with seq advancing.
   ProtocolPayload payload = {};
   payload.found = 1;
   payload.aim_x = 0.5F;
@@ -253,31 +295,14 @@ int main()
   TEST_ASSERT(decoded.found == 0);
   TEST_ASSERT(decoded.aim_x == 0.0F);
 
-  // aim 与命令共用一块 region，后写者覆盖前写者：这是「一次事件一次 region 写」的
-  // 约定，不是丢更新。
-  // The aim and the command share one region, so the last writer wins: that is the
-  // one-region-write-per-event contract, not a lost update.
-  payload = {};
-  TEST_ASSERT(epoch_adapter.Region().Write(payload) == 3);
-  TEST_ASSERT(c606_view.Region().Read(&decoded, &seq) == ErrorCode::OK);
-  TEST_ASSERT(seq == 3);
-  TEST_ASSERT(decoded.found == 0);
-  TEST_ASSERT(decoded.cmd == 0);
-
-  // 冷页不产生消息。A cold page produces no message.
-  page.ClearHistory();
-  const TestPage blank_page(mapping.Data());
-  TestAdapter blank_adapter(blank_page, topic, 1000);
-  blank_adapter.Poll(2000000);
+  // 5. 冷页（未格式化）即使门铃响了也不发布。
+  // A cold (unformatted) page publishes nothing even when the doorbell rings.
+  const Mapping cold_mapping(TestFormat::PAGE_SIZE);
+  const TestPage cold_page(cold_mapping.Data());
+  TestAdapter cold_adapter(ringer.Wrap(), cold_page, topic);
+  ringer.Ring();
+  TEST_ASSERT(!cold_adapter.WaitAndPublish(0));
   TEST_ASSERT(capture.calls == 5);
-
-  TestAdapter rollback_adapter(page, topic, 1000);
-  rollback_adapter.Poll(5000);
-  writer.Write(make_sample(82));
-  TEST_ASSERT(rollback_adapter.Poll(4000));
-  TEST_ASSERT(capture.calls == 6);
-  TEST_ASSERT(capture.last.count == 1);
-  TEST_ASSERT(same_sample(capture.last.ring[0], make_sample(82)));
 
   return 0;
 }

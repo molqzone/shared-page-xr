@@ -8,7 +8,17 @@
 
 /**
  * @file linux_shared_page.hpp
- * @brief Linux shared-page topic adapter.
+ * @brief Linux shared-page topic adapter with an event-only data path.
+ *
+ * 数据到达**只由门铃事件触发**：构造即绑定事件源（取不到即失败），消费入口只有
+ * `WaitAndPublish()` 一条路——等门铃、drain、发布。这里刻意不提供轮询路径：轮询
+ * 一旦存在就会因为"方便"变成实际使用的那条，事件路径则慢慢烂掉。
+ *
+ * Data arrival is triggered by the doorbell event only: construction binds the
+ * event source (failing fast without one) and `WaitAndPublish()` is the single
+ * consumption entry -- wait, drain, publish. A polling path is deliberately
+ * absent: once one exists it becomes the path actually used because it is
+ * convenient, and the event path rots.
  */
 
 namespace LibXR
@@ -16,9 +26,6 @@ namespace LibXR
 
 /// @brief Default telemetry topic name.
 inline constexpr const char* TELEMETRY_TOPIC_NAME = "telemetry";
-
-/// @brief Default drain period.
-inline constexpr uint32_t DEFAULT_DRAIN_PERIOD_US = 1000;
 
 /**
  * @brief A batch drained from the telemetry ring.
@@ -31,6 +38,51 @@ struct TelemetryBatch
   uint32_t head = 0;
   uint8_t gap = 0;
   uint8_t reserved[3] = {};
+};
+
+/** @brief Doorbell event source: the only trigger for data arrival.
+ *
+ * fd 语义是事件型描述符（eventfd / pipe）：可读即有通知，`Wait()` 消费 8 字节重新
+ * 武装。平台绑定把 `cvi-rtos-cmdqu` 之类的设备适配成同一个形态（例如由绑定线程
+ * 转发写 eventfd），本库不接触任何平台 UAPI。
+ * The fd semantics are an event descriptor (eventfd/pipe): readable means a
+ * notification, and `Wait()` consumes 8 bytes to re-arm. Platform bindings adapt
+ * devices such as `cvi-rtos-cmdqu` into the same shape (for example a binding
+ * thread forwarding into an eventfd); this library touches no platform UAPI.
+ */
+class Doorbell
+{
+ public:
+  static constexpr uint32_t WAIT_FOREVER = UINT32_MAX;
+
+  /// @brief Create an eventfd-backed doorbell; producers signal by writing 8 bytes.
+  static Doorbell EventFd();
+
+  /// @brief Wrap an existing event descriptor. `own` controls close-on-destroy.
+  static Doorbell FromFd(int fd, bool own);
+
+  Doorbell() = default;
+  ~Doorbell();
+
+  Doorbell(const Doorbell&) = delete;
+  Doorbell& operator=(const Doorbell&) = delete;
+  Doorbell(Doorbell&& other) noexcept;
+  Doorbell& operator=(Doorbell&& other) noexcept;
+
+  [[nodiscard]] bool Valid() const { return fd_ >= 0; }
+
+  /**
+   * @brief Block until a notification arrives or the timeout elapses.
+   * @return true when a notification was consumed; false on timeout or an
+   *         unbound doorbell. `WAIT_FOREVER` blocks indefinitely.
+   */
+  [[nodiscard]] bool Wait(uint32_t timeout_ms) const;
+
+ private:
+  explicit Doorbell(int fd, bool own) : fd_(fd), own_(own) {}
+
+  int fd_ = -1;
+  bool own_ = false;
 };
 
 namespace detail
@@ -68,32 +120,32 @@ class LinuxSharedPage : public SharedPage<F, T, P, TAG>
   /// @brief The topic payload for this contract: one drained batch.
   using Batch = TelemetryBatch<T, F::SLOT_COUNT>;
 
-  LinuxSharedPage(uint64_t physical_address, Topic topic,
-                  uint32_t drain_period_us = DEFAULT_DRAIN_PERIOD_US)
-      : LinuxSharedPage(detail::LinuxMapping::Open(physical_address, F::PAGE_SIZE),
-                        topic, drain_period_us)
+  LinuxSharedPage(Doorbell doorbell, uint64_t physical_address, Topic topic)
+      : LinuxSharedPage(std::move(doorbell),
+                        detail::LinuxMapping::Open(physical_address, F::PAGE_SIZE),
+                        topic)
   {
   }
 
-  LinuxSharedPage(uint64_t physical_address,
-                  const char* topic_name = TELEMETRY_TOPIC_NAME,
-                  uint32_t drain_period_us = DEFAULT_DRAIN_PERIOD_US)
-      : LinuxSharedPage(physical_address, Topic::CreateTopic<Batch>(topic_name),
-                        drain_period_us)
+  LinuxSharedPage(Doorbell doorbell, uint64_t physical_address,
+                  const char* topic_name = TELEMETRY_TOPIC_NAME)
+      : LinuxSharedPage(std::move(doorbell), physical_address,
+                        Topic::CreateTopic<Batch>(topic_name))
   {
   }
 
-  LinuxSharedPage(const SharedPage<F, T, P, TAG>& page, Topic topic,
-                  uint32_t drain_period_us = DEFAULT_DRAIN_PERIOD_US)
-      : SharedPage<F, T, P, TAG>(page.Data(), topic), period_us_(drain_period_us)
+  LinuxSharedPage(Doorbell doorbell, const SharedPage<F, T, P, TAG>& page, Topic topic)
+      : SharedPage<F, T, P, TAG>(page.Data(), topic), doorbell_(std::move(doorbell))
   {
-    ASSERT(drain_period_us != 0);
+    // 无事件源 = 拒绝构造：轮询不是合法退路。
+    // No event source means refuse construction: polling is not a legal fallback.
+    ASSERT(doorbell_.Valid());
   }
 
-  LinuxSharedPage(const SharedPage<F, T, P, TAG>& page,
-                  const char* topic_name = TELEMETRY_TOPIC_NAME,
-                  uint32_t drain_period_us = DEFAULT_DRAIN_PERIOD_US)
-      : LinuxSharedPage(page, Topic::CreateTopic<Batch>(topic_name), drain_period_us)
+  LinuxSharedPage(Doorbell doorbell, const SharedPage<F, T, P, TAG>& page,
+                  const char* topic_name = TELEMETRY_TOPIC_NAME)
+      : LinuxSharedPage(std::move(doorbell), page,
+                        Topic::CreateTopic<Batch>(topic_name))
   {
   }
 
@@ -103,27 +155,18 @@ class LinuxSharedPage : public SharedPage<F, T, P, TAG>
   LinuxSharedPage& operator=(const LinuxSharedPage&) = delete;
 
   /**
-   * @brief Drain and publish when the period has elapsed.
+   * @brief The data path: wait for a doorbell, drain the new range, publish it.
+   * @param timeout_ms Bound for the doorbell wait; `Doorbell::WAIT_FOREVER`
+   *        blocks until a notification arrives.
+   * @return true when a batch was published; false on timeout, a spurious
+   *         notification, or a cold page.
    */
-  bool Poll(uint64_t now_us = UINT64_MAX)
+  [[nodiscard]] bool WaitAndPublish(uint32_t timeout_ms)
   {
-    static_assert(offsetof(Batch, count) == sizeof(T) * F::SLOT_COUNT,
-                  "the batch counter must follow the ring without padding");
-
-    if (now_us == UINT64_MAX)
-    {
-      now_us = static_cast<uint64_t>(Timebase::GetMicroseconds());
-    }
-
-    if (!clock_started_)
-    {
-      clock_started_ = true;
-    }
-    else if (now_us >= last_drain_us_ && now_us - last_drain_us_ < period_us_)
+    if (!doorbell_.Wait(timeout_ms))
     {
       return false;
     }
-    last_drain_us_ = now_us;
 
     Batch batch = {};
     if (Drain(&batch) == 0 && batch.gap == 0)
@@ -131,7 +174,7 @@ class LinuxSharedPage : public SharedPage<F, T, P, TAG>
       return false;
     }
 
-    this->Publish(batch, MicrosecondTimestamp(now_us));
+    this->Publish(batch, MicrosecondTimestamp(Timebase::GetMicroseconds()));
     return true;
   }
 
@@ -152,8 +195,8 @@ class LinuxSharedPage : public SharedPage<F, T, P, TAG>
     }
 
     SinceResult result = {};
-    const ErrorCode status = this->TelemetryReader().Since(
-        last_seen_, batch->ring, F::SLOT_COUNT, &result);
+    const ErrorCode status =
+        this->TelemetryReader().Since(last_seen_, batch->ring, F::SLOT_COUNT, &result);
     if (status == ErrorCode::BUSY)
     {
       return 0;
@@ -173,19 +216,17 @@ class LinuxSharedPage : public SharedPage<F, T, P, TAG>
   [[nodiscard]] uint32_t LastSeen() const { return last_seen_; }
 
  private:
-  LinuxSharedPage(detail::LinuxMapping mapping, Topic topic, uint32_t drain_period_us)
+  LinuxSharedPage(Doorbell doorbell, detail::LinuxMapping mapping, Topic topic)
       : SharedPage<F, T, P, TAG>(mapping.Data(), topic),
-        mapping_(std::move(mapping)),
-        period_us_(drain_period_us)
+        doorbell_(std::move(doorbell)),
+        mapping_(std::move(mapping))
   {
-    ASSERT(drain_period_us != 0);
+    ASSERT(doorbell_.Valid());
   }
 
+  Doorbell doorbell_;
   detail::LinuxMapping mapping_;
   uint32_t last_seen_ = 0;
-  uint64_t last_drain_us_ = 0;
-  uint32_t period_us_ = DEFAULT_DRAIN_PERIOD_US;
-  bool clock_started_ = false;
 };
 
 }  // namespace LibXR

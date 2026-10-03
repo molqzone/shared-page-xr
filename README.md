@@ -12,16 +12,20 @@ SG2002 大小核（Linux 大核 ↔ C906L RTOS 小核）共享页传输。`Share
 ## 组成
 
 ```text
-shared_page.hpp / .cpp        页协议 + typed 视图：SharedPage<T, P, TAG> : Topic、
+shared_page.hpp / .cpp        页协议 + typed 视图：SharedPage<F, T, P, TAG> : Topic、
                               Telemetry<T>、Reference<P>。C906L 控制环直接用
-linux_shared_page.hpp / .cpp  LinuxSharedPage<T, P, TAG> : SharedPage：/dev/mem 映射 +
-                              drain → Topic
+linux_shared_page.hpp / .cpp  LinuxSharedPage<F, T, P, TAG> : SharedPage：/dev/mem 映射 +
+                              门铃事件 → drain → Topic；Doorbell 事件源
 CMakeLists.txt                STATIC target shared_page_xr，链接 libxr；Linux 侧只在 Linux
                               构建中编译
 ```
 
 声明与实现分开：`.hpp` 保留契约与类声明，协议逻辑在 `.cpp` 的类型擦除引擎里（`detail::`），
 typed 层只是带 `static_assert` 的薄转发；wire 类型变多也不会复制协议实现。
+
+**数据路径只有一条：门铃事件**。构造即绑定事件源（取不到即拒绝构造），消费入口只有
+`WaitAndPublish()`——等门铃、drain、发布。刻意不提供轮询路径：轮询一旦存在就会因为
+"方便"变成实际使用的那条。周期代码只许看状态（`LastSeen()` 时鲜检查），不许过手数据。
 
 ## 帧格式是平台数据，载荷是应用数据，语义归本库
 
@@ -64,11 +68,14 @@ page.WriteSample(sample);                        // 写 ring + 推 head
 Command command = {};
 if (page.Region().Read(&command, &seq) == ErrorCode::OK) { /* 用 command */ }
 
-// Linux 侧 producer / recorder：LinuxSharedPage owns the /dev/mem mapping
-LibXR::LinuxSharedPage<Format, Sample, Command> page(/* shared-page physical address */,
-                                                     "telemetry", 1000);
+// Linux 侧 producer / recorder：LinuxSharedPage owns the /dev/mem mapping，
+// 门铃是唯一触发（平台绑定把 cvi-rtos-cmdqu 适配成 Doorbell 同形态）
+LibXR::Doorbell doorbell = /* 平台绑定的事件源 */;
+LibXR::LinuxSharedPage<Format, Sample, Command> page(std::move(doorbell),
+                                                     /* shared-page physical address */,
+                                                     "telemetry");
 LibXR::Topic& telemetry = page;                  // module boundary
-page.Poll();                                     // 1kHz：drain 新区间发一组
+for (;;) { page.WaitAndPublish(Doorbell::WAIT_FOREVER); }  // 事件驱动，无轮询
 ```
 
 ## 页布局（页长/槽位随 format，两侧均非缓存映射）
@@ -143,8 +150,9 @@ ctest --test-dir build-host -R "shared_page|linux_shared_page" --output-on-failu
 `test_shared_page.cpp`：布局与发布索引——帧几何跟随注入 format、`TelemetryRing`/`Region`
 跟随注入类型的偏移与总长、页头自描述互验与 `MISMATCH`（TAG/载荷尺寸/帧几何漂移）、
 `Latest`/`Since` 的边界（SLOT_COUNT 槽余量、gap、新纪元）、region 稳定读与撕裂重试。
-`test_linux_shared_page.cpp`：驱动真实 LibXR `Topic`——节律门、一组遥测进回调订阅者、
-gap 后重新同步、以及由高层 payload 写入的参考区回读。
+`test_linux_shared_page.cpp`：事件门（无门铃不发布、空铃/超时/冷页不发布、多次通知
+coalesce 成一次 drain）、一组遥测进真实 LibXR topic 的回调订阅者、gap 后重新同步、
+以及由高层 payload 写入的参考区回读。
 
 ### 已知待办
 

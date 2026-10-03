@@ -16,7 +16,7 @@ endif()
 # STATIC target（与 libxr 的默认一致）：实现放在 .cpp 里，头文件保留契约与声明。
 # STATIC target, matching the LibXR default: implementations live in the .cpp files and
 # the headers hold only the contract and the declarations. The page contract itself is
-# platform neutral (`shared_page.hpp`, used directly by C606); the Linux-side drain is
+# platform neutral (`shared_page.hpp`, used directly by C906L); the Linux-side drain is
 # compiled only for Linux and is exposed by `linux_shared_page.hpp`.
 if(NOT TARGET shared_page_xr)
   set(_shared_page_sources shared_page.cpp)

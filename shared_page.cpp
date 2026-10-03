@@ -1,8 +1,10 @@
 #include "shared_page.hpp"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <utility>
 
 #include "libxr.hpp"
 
@@ -19,124 +21,60 @@ bool try_claim(std::atomic<uint32_t>& state)
                                        std::memory_order_relaxed);
 }
 
-template <size_t Bytes>
-void atomic_store(void* destination, const void* source)
+// 逐字原子拷贝：跨核页面上的字段没有普通读写可言，每 4B 都是一次 atomic_ref 访问。
+// 字节数必须是 4 的倍数（MakeLayout 保证）；页面一侧用 uint32_t 视图访问，普通缓冲
+// 一侧用 memcpy，不违反混叠规则。
+// Word-by-word atomic copy: nothing on the cross-core page has plain accesses; every
+// 4B is one atomic_ref operation. The byte counts must be multiples of four, which
+// MakeLayout guarantees; the page side is accessed through a uint32_t view and the
+// ordinary buffer side through memcpy, so no aliasing rule is bent.
+void atomic_copy(void* destination, const void* source, size_t bytes)
 {
-  static_assert(Bytes % sizeof(uint32_t) == 0);
-  uint32_t words[Bytes / sizeof(uint32_t)];
-  std::memcpy(words, source, Bytes);
-  auto* target = static_cast<uint32_t*>(destination);
-  for (size_t index = 0; index < Bytes / sizeof(uint32_t); ++index)
+  for (size_t offset = 0; offset < bytes; offset += sizeof(uint32_t))
   {
-    std::atomic_ref<uint32_t>(target[index])
-        .store(words[index], std::memory_order_relaxed);
+    uint32_t word = 0;
+    std::memcpy(&word, static_cast<const uint8_t*>(source) + offset, sizeof(word));
+    std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(
+                                  static_cast<uint8_t*>(destination) + offset))
+        .store(word, std::memory_order_relaxed);
   }
 }
 
-template <size_t Bytes>
-void atomic_load(void* destination, const void* source)
+void atomic_load_bytes(void* destination, const void* source, size_t bytes)
 {
-  static_assert(Bytes % sizeof(uint32_t) == 0);
-  uint32_t words[Bytes / sizeof(uint32_t)];
-  const auto* source_words = static_cast<const uint32_t*>(source);
-  for (size_t index = 0; index < Bytes / sizeof(uint32_t); ++index)
+  for (size_t offset = 0; offset < bytes; offset += sizeof(uint32_t))
   {
-    words[index] = std::atomic_ref<const uint32_t>(source_words[index])
-                       .load(std::memory_order_relaxed);
+    const uint32_t word =
+        std::atomic_ref<const uint32_t>(
+            *reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(source) +
+                                               offset))
+            .load(std::memory_order_relaxed);
+    std::memcpy(static_cast<uint8_t*>(destination) + offset, &word, sizeof(word));
   }
-  std::memcpy(destination, words, Bytes);
 }
 }  // namespace
 
-SharedPage::SharedPage(void* addr) : Topic(), page_(static_cast<uint8_t*>(addr)) {}
-
-SharedPage::SharedPage(void* addr, Topic topic)
-    : Topic(topic), page_(static_cast<uint8_t*>(addr))
+namespace detail
 {
-}
-
-bool SharedPage::Valid() const { return page_ != nullptr; }
-
-uint8_t* SharedPage::Data() const { return page_; }
-
-PageMagicKind SharedPage::Check() const
-{
-  if (page_ == nullptr)
-  {
-    return PageMagicKind::UNFORMATTED;
-  }
-
-  const auto* nodes = reinterpret_cast<const PageHeader*>(page_);
-  if (nodes->magic == PAGE_MAGIC && nodes->page_size == PAGE_SIZE)
-  {
-    return PageMagicKind::FORMATTED;
-  }
-
-  // A zero page is unformatted; any other invalid header is foreign.
-  for (size_t i = 0; i < PAGE_SIZE; ++i)
-  {
-    if (page_[i] != 0)
-    {
-      return PageMagicKind::FOREIGN;
-    }
-  }
-  return PageMagicKind::UNFORMATTED;
-}
-
-void SharedPage::Format()
-{
-  if (page_ == nullptr)
-  {
-    return;
-  }
-
-  std::memset(page_, 0, PAGE_SIZE);
-  auto* nodes = reinterpret_cast<PageHeader*>(page_);
-  nodes->magic = PAGE_MAGIC;
-  nodes->page_size = PAGE_SIZE;
-}
-
-void SharedPage::ClearHistory()
-{
-  if (page_ == nullptr)
-  {
-    return;
-  }
-
-  auto* telemetry = reinterpret_cast<TelemetryRing*>(page_ + telemetry_offset());
-  auto* reference = reinterpret_cast<LibXR::Region*>(page_ + region_offset());
-  if (!try_claim(telemetry->write_state))
-  {
-    return;
-  }
-  if (!try_claim(reference->write_state))
-  {
-    telemetry->write_state.store(0, std::memory_order_release);
-    return;
-  }
-  telemetry->head.store(0, std::memory_order_release);
-  reference->seq.store(0, std::memory_order_release);
-  reference->write_state.store(0, std::memory_order_release);
-  telemetry->write_state.store(0, std::memory_order_release);
-}
-
-Telemetry::Telemetry(void* addr)
+TelemetryCore::TelemetryCore(void* addr, const PageLayout& layout)
 {
   if (addr == nullptr)
   {
     return;
   }
 
-  auto* telemetry =
-      reinterpret_cast<TelemetryRing*>(static_cast<uint8_t*>(addr) + telemetry_offset());
-  head_ = &telemetry->head;
-  state_ = &telemetry->write_state;
-  ring_ = telemetry->ring;
+  head_ = reinterpret_cast<std::atomic<uint32_t>*>(
+      static_cast<uint8_t*>(addr) + telemetry_offset() +
+      static_cast<size_t>(layout.sample_size) * TELEMETRY_SLOTS);
+  state_ = reinterpret_cast<std::atomic<uint32_t>*>(
+      reinterpret_cast<uint8_t*>(head_) + sizeof(uint32_t));
+  ring_ = static_cast<uint8_t*>(addr) + telemetry_offset();
+  stride_ = layout.sample_size;
 }
 
-uint32_t Telemetry::Write(const Sample& sample)
+uint32_t TelemetryCore::Write(const void* sample)
 {
-  if (head_ == nullptr || state_ == nullptr || ring_ == nullptr)
+  if (sample == nullptr || head_ == nullptr || state_ == nullptr || ring_ == nullptr)
   {
     return 0;
   }
@@ -149,20 +87,21 @@ uint32_t Telemetry::Write(const Sample& sample)
   }
 
   const uint32_t head = head_->load(std::memory_order_relaxed);
-  atomic_store<sizeof(Sample)>(&ring_[head % TELEMETRY_SLOTS], &sample);
+  atomic_copy(ring_ + static_cast<size_t>(head % TELEMETRY_SLOTS) * stride_, sample,
+              stride_);
   head_->store(head + 1, std::memory_order_release);
   state_->store(0, std::memory_order_release);
   return head + 1;
 }
 
-uint32_t Telemetry::Head() const
+uint32_t TelemetryCore::Head() const
 {
   return head_ == nullptr ? 0 : head_->load(std::memory_order_acquire);
 }
 
-bool Telemetry::Latest(Sample* sample) const
+bool TelemetryCore::Latest(void* out) const
 {
-  if (sample == nullptr || head_ == nullptr || state_ == nullptr || ring_ == nullptr)
+  if (out == nullptr || head_ == nullptr || state_ == nullptr || ring_ == nullptr)
   {
     return false;
   }
@@ -180,12 +119,12 @@ bool Telemetry::Latest(Sample* sample) const
       return false;
     }
 
-    Sample value = {};
-    atomic_load<sizeof(Sample)>(&value, &ring_[(head - 1) % TELEMETRY_SLOTS]);
+    const uint8_t* slot =
+        ring_ + static_cast<size_t>((head - 1) % TELEMETRY_SLOTS) * stride_;
+    atomic_load_bytes(out, slot, stride_);
     const uint32_t after = head_->load(std::memory_order_acquire);
     if (after == head && state_->load(std::memory_order_acquire) == 0)
     {
-      *sample = value;
       return true;
     }
   }
@@ -193,8 +132,8 @@ bool Telemetry::Latest(Sample* sample) const
   return false;
 }
 
-ErrorCode Telemetry::Since(uint32_t last_seen, Sample* samples, uint32_t capacity,
-                           SinceResult* result) const
+ErrorCode TelemetryCore::Since(uint32_t last_seen, void* out, uint32_t capacity,
+                               SinceResult* result) const
 {
   if (result == nullptr)
   {
@@ -234,21 +173,25 @@ ErrorCode Telemetry::Since(uint32_t last_seen, Sample* samples, uint32_t capacit
       return ErrorCode::EMPTY;
     }
 
-    const uint32_t written =
-        samples == nullptr ? 0 : ((count < capacity) ? count : capacity);
-    if (samples != nullptr)
+    const uint32_t written = out == nullptr ? 0 : ((count < capacity) ? count : capacity);
+    if (out != nullptr)
     {
+      auto* samples = static_cast<uint8_t*>(out);
       for (uint32_t index = 0; index < written; ++index)
       {
-        atomic_load<sizeof(Sample)>(&samples[index],
-                                    &ring_[(head - 1 - index) % TELEMETRY_SLOTS]);
+        atomic_load_bytes(samples + static_cast<size_t>(index) * stride_,
+                          ring_ + static_cast<size_t>((head - 1 - index) % TELEMETRY_SLOTS) *
+                                      stride_,
+                          stride_);
       }
       for (uint32_t first = 0, last = written == 0 ? 0 : written - 1; first < last;
            ++first, --last)
       {
-        const Sample value = samples[first];
-        samples[first] = samples[last];
-        samples[last] = value;
+        for (uint32_t offset = 0; offset < stride_; ++offset)
+        {
+          std::swap(samples[static_cast<size_t>(first) * stride_ + offset],
+                    samples[static_cast<size_t>(last) * stride_ + offset]);
+        }
       }
     }
 
@@ -268,38 +211,43 @@ ErrorCode Telemetry::Since(uint32_t last_seen, Sample* samples, uint32_t capacit
   return ErrorCode::BUSY;
 }
 
-uint32_t Telemetry::SeekToHead() const { return Head(); }
-
-Reference::Reference(void* addr)
-    : region_(addr == nullptr ? nullptr
-                              : reinterpret_cast<Region*>(static_cast<uint8_t*>(addr) +
-                                                          region_offset()))
+ReferenceCore::ReferenceCore(void* addr, const PageLayout& layout)
 {
+  if (addr == nullptr)
+  {
+    return;
+  }
+
+  payload_ = static_cast<uint8_t*>(addr) + layout.region_offset;
+  state_ = reinterpret_cast<std::atomic<uint32_t>*>(payload_ + layout.payload_size);
+  seq_ = reinterpret_cast<std::atomic<uint32_t>*>(payload_ + layout.payload_size +
+                                                 sizeof(uint32_t));
+  payload_size_ = layout.payload_size;
 }
 
-ErrorCode Reference::Read(Region* out, uint32_t retries) const
+ErrorCode ReferenceCore::Read(void* out, uint32_t* seq, uint32_t retries) const
 {
-  if (out == nullptr || region_ == nullptr)
+  if (out == nullptr || payload_ == nullptr || state_ == nullptr || seq_ == nullptr)
   {
     return ErrorCode::PTR_NULL;
   }
 
   for (uint32_t attempt = 0; attempt < retries; ++attempt)
   {
-    if (region_->write_state.load(std::memory_order_acquire) != 0)
+    if (state_->load(std::memory_order_acquire) != 0)
     {
       continue;
     }
 
-    const uint32_t before = region_->seq.load(std::memory_order_acquire);
-    uint8_t payload[REGION_PAYLOAD_BYTES] = {};
-    atomic_load<REGION_PAYLOAD_BYTES>(payload, region_->payload);
-    const uint32_t after = region_->seq.load(std::memory_order_acquire);
-    if (before == after && region_->write_state.load(std::memory_order_acquire) == 0)
+    const uint32_t before = seq_->load(std::memory_order_acquire);
+    atomic_load_bytes(out, payload_, payload_size_);
+    const uint32_t after = seq_->load(std::memory_order_acquire);
+    if (before == after && state_->load(std::memory_order_acquire) == 0)
     {
-      std::memcpy(out->payload, payload, REGION_PAYLOAD_BYTES);
-      out->write_state.store(0, std::memory_order_relaxed);
-      out->seq.store(after, std::memory_order_relaxed);
+      if (seq != nullptr)
+      {
+        *seq = after;
+      }
       return ErrorCode::OK;
     }
   }
@@ -307,52 +255,118 @@ ErrorCode Reference::Read(Region* out, uint32_t retries) const
   return ErrorCode::BUSY;
 }
 
-uint32_t Reference::Seq() const
+uint32_t ReferenceCore::Write(const void* payload)
 {
-  return region_ == nullptr ? 0 : region_->seq.load(std::memory_order_acquire);
-}
-
-uint32_t Reference::Write(const void* payload, size_t size)
-{
-  if (region_ == nullptr || payload == nullptr || size > REGION_PAYLOAD_BYTES)
+  if (payload_ == nullptr || state_ == nullptr || seq_ == nullptr || payload == nullptr)
   {
     return 0;
   }
 
-  uint8_t value[REGION_PAYLOAD_BYTES] = {};
-  std::memcpy(value, payload, size);
-
-  if (!try_claim(region_->write_state))
+  if (!try_claim(*state_))
   {
     return 0;
   }
 
-  const uint32_t next = region_->seq.load(std::memory_order_relaxed) + 1;
-  atomic_store<REGION_PAYLOAD_BYTES>(region_->payload, value);
-  region_->seq.store(next, std::memory_order_release);
-  region_->write_state.store(0, std::memory_order_release);
+  const uint32_t next = seq_->load(std::memory_order_relaxed) + 1;
+  atomic_copy(payload_, payload, payload_size_);
+  seq_->store(next, std::memory_order_release);
+  state_->store(0, std::memory_order_release);
   return next;
 }
 
-const Region* Reference::Raw() const { return region_; }
-
-bool SharedPage::Ready() const { return Check() == PageMagicKind::FORMATTED; }
-
-Telemetry SharedPage::TelemetryWriter() { return Telemetry(Data()); }
-
-Telemetry SharedPage::TelemetryWriter() const { return Telemetry(Data()); }
-
-Telemetry SharedPage::TelemetryReader() const { return TelemetryWriter(); }
-
-Reference SharedPage::Region() { return Reference(Data()); }
-
-Reference SharedPage::Region() const { return Reference(Data()); }
-
-uint32_t SharedPage::WriteSample(const Sample& sample)
+uint32_t ReferenceCore::Seq() const
 {
-  return TelemetryWriter().Write(sample);
+  return seq_ == nullptr ? 0 : seq_->load(std::memory_order_acquire);
 }
 
-bool SharedPage::Latest(Sample* sample) const { return TelemetryReader().Latest(sample); }
+const void* ReferenceCore::Raw() const { return payload_; }
 
+PageCore::PageCore(void* addr, const PageLayout& layout)
+    : page_(static_cast<uint8_t*>(addr)), layout_(layout)
+{
+}
+
+bool PageCore::Valid() const { return page_ != nullptr; }
+
+uint8_t* PageCore::Data() const { return page_; }
+
+PageMagicKind PageCore::Check() const
+{
+  if (page_ == nullptr)
+  {
+    return PageMagicKind::UNFORMATTED;
+  }
+
+  const auto* header = reinterpret_cast<const PageHeader*>(page_);
+  if (header->magic == PAGE_MAGIC)
+  {
+    if (header->page_size == PAGE_SIZE && header->layout == layout_.fingerprint)
+    {
+      return PageMagicKind::FORMATTED;
+    }
+    // 魔术字对但布局指纹不对：双端用了不同版本的 wire 结构。
+    // Right magic but wrong layout fingerprint: the two ends disagree on the wire
+    // structure.
+    return header->page_size == PAGE_SIZE ? PageMagicKind::MISMATCH
+                                          : PageMagicKind::FOREIGN;
+  }
+
+  // A zero page is unformatted; any other invalid header is foreign.
+  for (size_t i = 0; i < PAGE_SIZE; ++i)
+  {
+    if (page_[i] != 0)
+    {
+      return PageMagicKind::FOREIGN;
+    }
+  }
+  return PageMagicKind::UNFORMATTED;
+}
+
+void PageCore::Format()
+{
+  if (page_ == nullptr)
+  {
+    return;
+  }
+
+  std::memset(page_, 0, PAGE_SIZE);
+  auto* header = reinterpret_cast<PageHeader*>(page_);
+  header->magic = PAGE_MAGIC;
+  header->page_size = PAGE_SIZE;
+  header->layout = layout_.fingerprint;
+}
+
+void PageCore::ClearHistory()
+{
+  if (page_ == nullptr)
+  {
+    return;
+  }
+
+  auto* head = reinterpret_cast<std::atomic<uint32_t>*>(
+      page_ + telemetry_offset() + static_cast<size_t>(layout_.sample_size) *
+                                       TELEMETRY_SLOTS);
+  auto* telemetry_state =
+      reinterpret_cast<std::atomic<uint32_t>*>(reinterpret_cast<uint8_t*>(head) +
+                                               sizeof(uint32_t));
+  auto* region_state = reinterpret_cast<std::atomic<uint32_t>*>(
+      page_ + layout_.region_offset + layout_.payload_size);
+  auto* region_seq = reinterpret_cast<std::atomic<uint32_t>*>(
+      page_ + layout_.region_offset + layout_.payload_size + sizeof(uint32_t));
+
+  if (!try_claim(*telemetry_state))
+  {
+    return;
+  }
+  if (!try_claim(*region_state))
+  {
+    telemetry_state->store(0, std::memory_order_release);
+    return;
+  }
+  head->store(0, std::memory_order_release);
+  region_seq->store(0, std::memory_order_release);
+  region_state->store(0, std::memory_order_release);
+  telemetry_state->store(0, std::memory_order_release);
+}
+}  // namespace detail
 }  // namespace LibXR

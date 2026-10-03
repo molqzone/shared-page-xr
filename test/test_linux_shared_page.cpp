@@ -39,18 +39,10 @@
 using namespace LibXR;
 using LibXRTest::make_sample;
 using LibXRTest::same_sample;
+using Sample = LibXRTest::Sample;
 
 namespace
 {
-
-/// 收集遥测 topic 上的每一组。Captures every batch published on the telemetry topic.
-struct BatchCapture
-{
-  uint32_t calls = 0;
-  TelemetryBatch last = {};
-  std::array<uint32_t, 8> counts = {};
-  std::array<uint64_t, 8> timestamps_us = {};
-};
 
 struct ProtocolPayload
 {
@@ -66,10 +58,23 @@ struct ProtocolPayload
   static constexpr uint8_t CMD_PARAM = 2;
 };
 
-static_assert(sizeof(ProtocolPayload) == REGION_PAYLOAD_BYTES);
+static_assert(sizeof(ProtocolPayload) == 24);
+
+using TestPage = SharedPage<Sample, ProtocolPayload>;
+using TestBatch = TelemetryBatch<Sample>;
+using TestAdapter = LinuxSharedPage<Sample, ProtocolPayload>;
+
+/// 收集遥测 topic 上的每一组。Captures every batch published on the telemetry topic.
+struct BatchCapture
+{
+  uint32_t calls = 0;
+  TestBatch last = {};
+  std::array<uint32_t, 8> counts = {};
+  std::array<uint64_t, 8> timestamps_us = {};
+};
 
 void on_batch(bool, BatchCapture* capture,
-              const LibXR::Topic::MessageView<TelemetryBatch>& message)
+              const LibXR::Topic::MessageView<TestBatch>& message)
 {
   if (capture == nullptr || message.data == nullptr)
   {
@@ -110,31 +115,31 @@ class Mapping
 
 int main()
 {
-  static_assert(std::is_base_of_v<LibXR::Topic, SharedPage>);
-  static_assert(std::is_base_of_v<LibXR::Topic, LinuxSharedPage>);
+  static_assert(std::is_base_of_v<LibXR::Topic, TestPage>);
+  static_assert(std::is_base_of_v<LibXR::Topic, TestAdapter>);
 
   const Mapping mapping(PAGE_SIZE);
-  SharedPage page(mapping.Data());
+  TestPage page(mapping.Data());
   page.Format();
   TEST_ASSERT(page.Ready());
 
   LibXR::Topic::Domain domain("shared_page_xr");
-  const LibXR::Topic topic(
-      LibXR::Topic::FindOrCreate<TelemetryBatch>(TELEMETRY_TOPIC_NAME, &domain));
+  const LibXR::Topic topic(LibXR::Topic::FindOrCreate<TestBatch>(TELEMETRY_TOPIC_NAME,
+                                                                 &domain));
   BatchCapture capture;
   auto callback = LibXR::Topic::Callback::Create(on_batch, &capture);
 
-  LinuxSharedPage adapter(page, topic, 1000);
+  TestAdapter adapter(page, topic, 1000);
   TEST_ASSERT(adapter.Drain(nullptr) == 0);
   LibXR::Topic& boundary = adapter;
   boundary.RegisterCallback(callback);
 
-  const LinuxSharedPage produced(page, "shared_page_owned_topic");
-  TEST_ASSERT(produced.PayloadSize() == sizeof(TelemetryBatch));
+  const TestAdapter produced(page, "shared_page_owned_topic");
+  TEST_ASSERT(produced.PayloadSize() == sizeof(TestBatch));
 
-  // 第一次 Poll 只确立节律基准；C606 侧还没写数据，所以不发布。
+  // 第一次 Poll 只确立节律基准；C906L 侧还没写数据，所以不发布。
   // The first poll only establishes the cadence baseline; nothing has been written on
-  // the C606 side, so it publishes nothing.
+  // the C906L side, so it publishes nothing.
   adapter.Poll(1000000);
   TEST_ASSERT(capture.calls == 0);
   TEST_ASSERT(adapter.LastSeen() == 0);
@@ -168,7 +173,7 @@ int main()
   // across the reset: a stale last_seen across a restart is the case the gap rule
   // covers above.
   page.ClearHistory();
-  LinuxSharedPage epoch_adapter(page, topic);
+  TestAdapter epoch_adapter(page, topic);
   epoch_adapter.Poll(1003000);
   TEST_ASSERT(capture.calls == 2);
   for (uint32_t index = 0; index < 5; ++index)
@@ -216,9 +221,9 @@ int main()
   TEST_ASSERT(same_sample(capture.last.ring[1], make_sample(81)));
 
   auto* telemetry_ring =
-      reinterpret_cast<TelemetryRing*>(mapping.Data() + telemetry_offset());
+      reinterpret_cast<TelemetryRing<Sample>*>(mapping.Data() + telemetry_offset());
   telemetry_ring->write_state.store(1, std::memory_order_release);
-  TelemetryBatch busy_batch = {};
+  TestBatch busy_batch = {};
   TEST_ASSERT(epoch_adapter.Drain(&busy_batch) == 0);
   TEST_ASSERT(epoch_adapter.LastSeen() == 82);
   telemetry_ring->write_state.store(0, std::memory_order_release);
@@ -235,12 +240,11 @@ int main()
   payload.value = 3.5F;
   TEST_ASSERT(epoch_adapter.Region().Write(payload) == 2);
 
-  SharedPage c606_view(mapping.Data());
-  Region snapshot = {};
-  TEST_ASSERT(c606_view.Region().Read(&snapshot) == ErrorCode::OK);
-  TEST_ASSERT(snapshot.seq.load() == 2);
+  TestPage c606_view(mapping.Data());
+  uint32_t seq = 0;
   ProtocolPayload decoded = {};
-  TEST_ASSERT(c606_view.Region().Read(&decoded) == ErrorCode::OK);
+  TEST_ASSERT(c606_view.Region().Read(&decoded, &seq) == ErrorCode::OK);
+  TEST_ASSERT(seq == 2);
   TEST_ASSERT(decoded.cmd == ProtocolPayload::CMD_PARAM);
   TEST_ASSERT(decoded.param_id == 7);
   TEST_ASSERT(decoded.value == 3.5F);
@@ -253,20 +257,19 @@ int main()
   // one-region-write-per-event contract, not a lost update.
   payload = {};
   TEST_ASSERT(epoch_adapter.Region().Write(payload) == 3);
-  TEST_ASSERT(c606_view.Region().Read(&snapshot) == ErrorCode::OK);
-  TEST_ASSERT(snapshot.seq.load() == 3);
-  TEST_ASSERT(c606_view.Region().Read(&decoded) == ErrorCode::OK);
+  TEST_ASSERT(c606_view.Region().Read(&decoded, &seq) == ErrorCode::OK);
+  TEST_ASSERT(seq == 3);
   TEST_ASSERT(decoded.found == 0);
   TEST_ASSERT(decoded.cmd == 0);
 
   // 冷页不产生消息。A cold page produces no message.
   page.ClearHistory();
-  const SharedPage blank_page(mapping.Data());
-  LinuxSharedPage blank_adapter(blank_page, topic, 1000);
+  const TestPage blank_page(mapping.Data());
+  TestAdapter blank_adapter(blank_page, topic, 1000);
   blank_adapter.Poll(2000000);
   TEST_ASSERT(capture.calls == 5);
 
-  LinuxSharedPage rollback_adapter(page, topic, 1000);
+  TestAdapter rollback_adapter(page, topic, 1000);
   rollback_adapter.Poll(5000);
   writer.Write(make_sample(82));
   TEST_ASSERT(rollback_adapter.Poll(4000));

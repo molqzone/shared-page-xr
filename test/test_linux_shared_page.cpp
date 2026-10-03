@@ -24,15 +24,21 @@
 #include <sys/mman.h>
 
 #include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <type_traits>
 
+#include "libxr_def.hpp"
 #include "linux_shared_page.hpp"
 #include "sample.hpp"
+#include "shared_page.hpp"
 #include "test_assert.hpp"
+#include "topic.hpp"
 
 using namespace LibXR;
-using LibXRTest::MakeSample;
-using LibXRTest::SameSample;
+using LibXRTest::make_sample;
+using LibXRTest::same_sample;
 
 namespace
 {
@@ -62,8 +68,8 @@ struct ProtocolPayload
 
 static_assert(sizeof(ProtocolPayload) == REGION_PAYLOAD_BYTES);
 
-void OnBatch(bool, BatchCapture* capture,
-             const LibXR::Topic::MessageView<TelemetryBatch>& message)
+void on_batch(bool, BatchCapture* capture,
+              const LibXR::Topic::MessageView<TelemetryBatch>& message)
 {
   if (capture == nullptr || message.data == nullptr)
   {
@@ -71,8 +77,8 @@ void OnBatch(bool, BatchCapture* capture,
   }
   TEST_ASSERT(capture->calls < capture->counts.size());
   capture->last = *message.data;
-  capture->counts[capture->calls] = message.data->count;
-  capture->timestamps_us[capture->calls] = static_cast<uint64_t>(message.timestamp);
+  capture->counts.at(capture->calls) = message.data->count;
+  capture->timestamps_us.at(capture->calls) = static_cast<uint64_t>(message.timestamp);
   ++capture->calls;
 }
 
@@ -107,22 +113,23 @@ int main()
   static_assert(std::is_base_of_v<LibXR::Topic, SharedPage>);
   static_assert(std::is_base_of_v<LibXR::Topic, LinuxSharedPage>);
 
-  Mapping mapping(PAGE_SIZE);
+  const Mapping mapping(PAGE_SIZE);
   SharedPage page(mapping.Data());
   page.Format();
   TEST_ASSERT(page.Ready());
 
   LibXR::Topic::Domain domain("shared_page_xr");
-  LibXR::Topic topic(
+  const LibXR::Topic topic(
       LibXR::Topic::FindOrCreate<TelemetryBatch>(TELEMETRY_TOPIC_NAME, &domain));
   BatchCapture capture;
-  auto callback = LibXR::Topic::Callback::Create(OnBatch, &capture);
+  auto callback = LibXR::Topic::Callback::Create(on_batch, &capture);
 
   LinuxSharedPage adapter(page, topic, 1000);
+  TEST_ASSERT(adapter.Drain(nullptr) == 0);
   LibXR::Topic& boundary = adapter;
   boundary.RegisterCallback(callback);
 
-  LinuxSharedPage produced(page, "shared_page_owned_topic");
+  const LinuxSharedPage produced(page, "shared_page_owned_topic");
   TEST_ASSERT(produced.PayloadSize() == sizeof(TelemetryBatch));
 
   // 第一次 Poll 只确立节律基准；C606 侧还没写数据，所以不发布。
@@ -136,22 +143,22 @@ int main()
   // A drain happens once the period elapsed and the sample written meanwhile rides
   // along with it.
   auto writer = page.TelemetryWriter();
-  writer.Write(MakeSample(0));
+  writer.Write(make_sample(0));
   adapter.Poll(1001000);
   TEST_ASSERT(capture.calls == 1);
   TEST_ASSERT(adapter.LastSeen() == 1);
   TEST_ASSERT(capture.last.count == 1);
-  TEST_ASSERT(SameSample(capture.last.ring[0], MakeSample(0)));
+  TEST_ASSERT(same_sample(capture.last.ring[0], make_sample(0)));
 
   // 差 1us 到周期：早退，不发布。
   // One microsecond short of the period is an early return, not a publish.
-  writer.Write(MakeSample(1));
+  writer.Write(make_sample(1));
   adapter.Poll(1001999);
   TEST_ASSERT(capture.calls == 1);
   adapter.Poll(1002000);
   TEST_ASSERT(capture.calls == 2);
   TEST_ASSERT(capture.last.count == 1);
-  TEST_ASSERT(SameSample(capture.last.ring[0], MakeSample(1)));
+  TEST_ASSERT(same_sample(capture.last.ring[0], make_sample(1)));
 
   // 新区间整段以一条消息发出，正序，head 作为它的索引。ClearHistory() 开启新纪元
   // （head 从 0 重新计），所以重建适配器而不是把它带过重置点：带着旧 last_seen 跨
@@ -166,7 +173,7 @@ int main()
   TEST_ASSERT(capture.calls == 2);
   for (uint32_t index = 0; index < 5; ++index)
   {
-    writer.Write(MakeSample(index));
+    writer.Write(make_sample(index));
   }
   epoch_adapter.Poll(1004000);
   TEST_ASSERT(capture.calls == 3);
@@ -175,19 +182,19 @@ int main()
   TEST_ASSERT(capture.last.gap == 0);
   for (uint32_t index = 0; index < 5; ++index)
   {
-    TEST_ASSERT(SameSample(capture.last.ring[index], MakeSample(index)));
+    TEST_ASSERT(same_sample(capture.last.ring[index], make_sample(index)));
   }
 
   // 发布时间戳就是调用者的 drain 时刻，下游 metadata 据此与视频帧对齐到同一时钟。
   // The publish timestamp is the caller's drain instant, so downstream metadata can
   // place the range on the same clock as the frames.
-  TEST_ASSERT(capture.timestamps_us[2] == 1004000);
+  TEST_ASSERT(capture.timestamps_us.at(2) == 1004000);
 
   // 读者被写者跑过：整段丢弃并标记 gap，而不是编造区间。
   // A lapped reader is reported as a gap with no samples instead of an invented range.
   for (uint32_t index = 5; index < 80; ++index)
   {
-    writer.Write(MakeSample(index));
+    writer.Write(make_sample(index));
   }
   epoch_adapter.Poll(1005000);
   TEST_ASSERT(capture.calls == 4);
@@ -198,18 +205,18 @@ int main()
 
   // gap 之后重新同步：下一段区间又是完整的。
   // After a gap the adapter resynchronises: the next range is complete again.
-  writer.Write(MakeSample(80));
-  writer.Write(MakeSample(81));
+  writer.Write(make_sample(80));
+  writer.Write(make_sample(81));
   epoch_adapter.Poll(1006000);
   TEST_ASSERT(capture.calls == 5);
   TEST_ASSERT(capture.last.gap == 0);
   TEST_ASSERT(capture.last.count == 2);
   TEST_ASSERT(capture.last.head == 82);
-  TEST_ASSERT(SameSample(capture.last.ring[0], MakeSample(80)));
-  TEST_ASSERT(SameSample(capture.last.ring[1], MakeSample(81)));
+  TEST_ASSERT(same_sample(capture.last.ring[0], make_sample(80)));
+  TEST_ASSERT(same_sample(capture.last.ring[1], make_sample(81)));
 
   auto* telemetry_ring =
-      reinterpret_cast<TelemetryRing*>(mapping.Data() + TelemetryOffset());
+      reinterpret_cast<TelemetryRing*>(mapping.Data() + telemetry_offset());
   telemetry_ring->write_state.store(1, std::memory_order_release);
   TelemetryBatch busy_batch = {};
   TEST_ASSERT(epoch_adapter.Drain(&busy_batch) == 0);
@@ -254,18 +261,18 @@ int main()
 
   // 冷页不产生消息。A cold page produces no message.
   page.ClearHistory();
-  SharedPage blank_page(mapping.Data());
+  const SharedPage blank_page(mapping.Data());
   LinuxSharedPage blank_adapter(blank_page, topic, 1000);
   blank_adapter.Poll(2000000);
   TEST_ASSERT(capture.calls == 5);
 
   LinuxSharedPage rollback_adapter(page, topic, 1000);
   rollback_adapter.Poll(5000);
-  writer.Write(MakeSample(82));
+  writer.Write(make_sample(82));
   TEST_ASSERT(rollback_adapter.Poll(4000));
   TEST_ASSERT(capture.calls == 6);
   TEST_ASSERT(capture.last.count == 1);
-  TEST_ASSERT(SameSample(capture.last.ring[0], MakeSample(82)));
+  TEST_ASSERT(same_sample(capture.last.ring[0], make_sample(82)));
 
   return 0;
 }

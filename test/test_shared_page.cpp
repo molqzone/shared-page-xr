@@ -27,17 +27,22 @@
 #include <sys/mman.h>
 
 #include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
+#include "libxr_def.hpp"
 #include "sample.hpp"
 #include "shared_page.hpp"
 #include "test_assert.hpp"
 
 using namespace LibXR;
-using LibXRTest::MakeSample;
-using LibXRTest::SameSample;
+using LibXRTest::make_sample;
+using LibXRTest::same_sample;
 
 namespace
 {
@@ -62,7 +67,7 @@ static_assert(sizeof(TestProtocolPayload) == REGION_PAYLOAD_BYTES);
 
 /// 读出一个结构体占用的字节，用于伪造外来页。Read a struct's bytes to forge a page.
 template <typename T>
-std::array<uint8_t, sizeof(T)> BytesOf(const T& value)
+std::array<uint8_t, sizeof(T)> bytes_of(const T& value)
 {
   std::array<uint8_t, sizeof(T)> bytes{};
   std::memcpy(bytes.data(), &value, sizeof(T));
@@ -94,7 +99,7 @@ class Mapping
 };
 
 /// 1. 双端编译依赖的数字。The numbers both cores compile against.
-void TestLayout()
+void test_layout()
 {
   TEST_ASSERT(sizeof(Sample) == SAMPLE_BYTES);
   TEST_ASSERT(offsetof(Sample, ticks) == 0);
@@ -113,9 +118,9 @@ void TestLayout()
   TEST_ASSERT(offsetof(Region, write_state) == 24);
   TEST_ASSERT(offsetof(Region, seq) == 28);
 
-  TEST_ASSERT(TelemetryOffset() == 8);
-  TEST_ASSERT(RegionOffset() == PAGE_SIZE - REGION_BYTES);
-  TEST_ASSERT(TelemetryOffset() + TELEMETRY_BYTES <= RegionOffset());
+  TEST_ASSERT(telemetry_offset() == 8);
+  TEST_ASSERT(region_offset() == PAGE_SIZE - REGION_BYTES);
+  TEST_ASSERT(telemetry_offset() + TELEMETRY_BYTES <= region_offset());
 
   // 发布索引必须是页内一个可原子访问的 4B 计数。
   // The publish index must be one atomically accessible 4B counter in the page.
@@ -125,8 +130,28 @@ void TestLayout()
   TEST_ASSERT(std::atomic<uint32_t>::is_always_lock_free);
 }
 
+void test_unbound_page()
+{
+  SharedPage page;
+  Sample sample = {};
+  SinceResult result = {.written = 1, .dropped = 1, .next = 1};
+  Region snapshot = {};
+  const auto reader = page.TelemetryReader();
+  auto reference = page.Region();
+
+  TEST_ASSERT(!page.Valid());
+  TEST_ASSERT(page.WriteSample(sample) == 0);
+  TEST_ASSERT(!page.Latest(&sample));
+  TEST_ASSERT(reader.Since(0, &sample, 1, &result) == ErrorCode::PTR_NULL);
+  TEST_ASSERT(result.written == 0 && result.dropped == 0 && result.next == 0);
+  TEST_ASSERT(reader.Since(0, &sample, 1, nullptr) == ErrorCode::PTR_NULL);
+  TEST_ASSERT(reference.Read(&snapshot) == ErrorCode::PTR_NULL);
+  TEST_ASSERT(reference.Read(static_cast<Region*>(nullptr)) == ErrorCode::PTR_NULL);
+  TEST_ASSERT(reference.Write(sample.ticks) == 0);
+}
+
 /// 2. 冷页、Format() 与发布索引。Cold page, Format(), and the publish index.
-void TestColdPageAndIndex(const Mapping& mapping)
+void test_cold_page_and_index(const Mapping& mapping)
 {
   SharedPage page(mapping.Data());
   TEST_ASSERT(page.Check() == PageMagicKind::UNFORMATTED);
@@ -140,7 +165,7 @@ void TestColdPageAndIndex(const Mapping& mapping)
   // 未格式化也能写：写者只需要映射，Format() 负责清零历史。
   // Writing before Format() is defined: the writer only needs the mapping, and
   // Format() zeroes the history.
-  TEST_ASSERT(page.WriteSample(MakeSample(0)) == 1);
+  TEST_ASSERT(page.WriteSample(make_sample(0)) == 1);
 
   page.Format();
   TEST_ASSERT(page.Check() == PageMagicKind::FORMATTED);
@@ -152,7 +177,7 @@ void TestColdPageAndIndex(const Mapping& mapping)
   TEST_ASSERT(header->magic == PAGE_MAGIC);
   TEST_ASSERT(header->page_size == PAGE_SIZE);
 
-  page.WriteSample(MakeSample(1));
+  page.WriteSample(make_sample(1));
   TEST_ASSERT(page.Latest(&probe));
   TEST_ASSERT(probe.ticks == 1001);
 
@@ -165,10 +190,10 @@ void TestColdPageAndIndex(const Mapping& mapping)
 
 /// 3. 外来页必须被识别，绝不能被静默使用。A foreign page must be reported, never
 ///    silently used.
-void TestForeignPage(const Mapping& mapping)
+void test_foreign_page(const Mapping& mapping)
 {
   const PageHeader foreign = {.magic = 0x11223344U, .page_size = PAGE_SIZE};
-  std::memcpy(mapping.Data(), BytesOf(foreign).data(), sizeof(foreign));
+  std::memcpy(mapping.Data(), bytes_of(foreign).data(), sizeof(foreign));
 
   SharedPage page(mapping.Data());
   TEST_ASSERT(page.Check() == PageMagicKind::FOREIGN);
@@ -178,33 +203,33 @@ void TestForeignPage(const Mapping& mapping)
 }
 
 /// 4. 发布索引与最新采样。Publish index and the latest sample.
-void TestLatest(const Mapping& mapping)
+void test_latest(const Mapping& mapping)
 {
   SharedPage page(mapping.Data());
   for (uint32_t index = 0; index < 3; ++index)
   {
-    TEST_ASSERT(page.TelemetryWriter().Write(MakeSample(index)) == index + 1);
+    TEST_ASSERT(page.TelemetryWriter().Write(make_sample(index)) == index + 1);
   }
   TEST_ASSERT(page.TelemetryWriter().Head() == 3);
 
   Sample latest = {};
   TEST_ASSERT(page.Latest(&latest));
-  TEST_ASSERT(SameSample(latest, MakeSample(2)));
+  TEST_ASSERT(same_sample(latest, make_sample(2)));
 
   const auto* ring =
-      reinterpret_cast<const TelemetryRing*>(mapping.Data() + TelemetryOffset());
-  TEST_ASSERT(SameSample(ring->ring[2], MakeSample(2)));
-  TEST_ASSERT(SameSample(ring->ring[0], MakeSample(0)));
+      reinterpret_cast<const TelemetryRing*>(mapping.Data() + telemetry_offset());
+  TEST_ASSERT(same_sample(ring->ring[2], make_sample(2)));
+  TEST_ASSERT(same_sample(ring->ring[0], make_sample(0)));
 
   auto* writable_ring =
-      reinterpret_cast<TelemetryRing*>(mapping.Data() + TelemetryOffset());
+      reinterpret_cast<TelemetryRing*>(mapping.Data() + telemetry_offset());
   writable_ring->write_state.store(1, std::memory_order_release);
-  TEST_ASSERT(page.TelemetryWriter().Write(MakeSample(3)) == 0);
+  TEST_ASSERT(page.TelemetryWriter().Write(make_sample(3)) == 0);
   writable_ring->write_state.store(0, std::memory_order_release);
 }
 
 /// 5. `Since()` 的区间、上界与 gap。Range, bound and gap of `Since()`.
-void TestSince(const Mapping& mapping)
+void test_since(const Mapping& mapping)
 {
   SharedPage page(mapping.Data());
   page.ClearHistory();
@@ -215,7 +240,7 @@ void TestSince(const Mapping& mapping)
   std::array<Sample, TELEMETRY_SLOTS> out = {};
 
   auto* telemetry_ring =
-      reinterpret_cast<TelemetryRing*>(mapping.Data() + TelemetryOffset());
+      reinterpret_cast<TelemetryRing*>(mapping.Data() + telemetry_offset());
   telemetry_ring->write_state.store(1, std::memory_order_release);
   TEST_ASSERT(reader.Since(0, out.data(), out.size(), &result) == ErrorCode::BUSY);
   TEST_ASSERT(result.dropped == 0);
@@ -230,7 +255,7 @@ void TestSince(const Mapping& mapping)
   // The writer ran 100 ahead; a reader 90 slots behind drops the whole range.
   for (uint32_t index = 0; index < 100; ++index)
   {
-    writer.Write(MakeSample(index));
+    writer.Write(make_sample(index));
   }
   TEST_ASSERT(writer.Head() == 100);
   TEST_ASSERT(reader.Since(10, out.data(), out.size(), &result) == ErrorCode::EMPTY);
@@ -243,7 +268,7 @@ void TestSince(const Mapping& mapping)
   page.ClearHistory();
   for (uint32_t index = 0; index < 64; ++index)
   {
-    writer.Write(MakeSample(index));
+    writer.Write(make_sample(index));
   }
   TEST_ASSERT(reader.Since(0, out.data(), out.size(), &result) == ErrorCode::OK);
   TEST_ASSERT(result.written == 64);
@@ -251,33 +276,33 @@ void TestSince(const Mapping& mapping)
   TEST_ASSERT(result.next == 64);
   for (uint32_t index = 0; index < 64; ++index)
   {
-    TEST_ASSERT(SameSample(out[index], MakeSample(index)));
+    TEST_ASSERT(same_sample(out.at(index), make_sample(index)));
   }
 
   // 接着 drain 一小段：区间上界是 head，序列正序。
   // Drain a short range: the upper bound is head and the order is ascending.
   for (uint32_t index = 64; index < 66; ++index)
   {
-    writer.Write(MakeSample(index));
+    writer.Write(make_sample(index));
   }
   TEST_ASSERT(reader.Since(64, out.data(), out.size(), &result) == ErrorCode::OK);
   TEST_ASSERT(result.written == 2);
   TEST_ASSERT(result.dropped == 0);
   TEST_ASSERT(result.next == 66);
-  TEST_ASSERT(SameSample(out[0], MakeSample(64)));
-  TEST_ASSERT(SameSample(out[1], MakeSample(65)));
+  TEST_ASSERT(same_sample(out.at(0), make_sample(64)));
+  TEST_ASSERT(same_sample(out.at(1), make_sample(65)));
 
   // 再写一条即可证明回绕：ClearHistory() 后索引从 0 重新计，head 66 落在槽 2。
   // One more write proves the wrap: after ClearHistory() the index restarts at 0, so
   // head 66 lives in slot 2.
-  writer.Write(MakeSample(66));
+  writer.Write(make_sample(66));
   TEST_ASSERT(reader.Since(66, out.data(), out.size(), &result) == ErrorCode::OK);
   TEST_ASSERT(result.written == 1);
   TEST_ASSERT(result.next == 67);
-  TEST_ASSERT(SameSample(out[0], MakeSample(66)));
+  TEST_ASSERT(same_sample(out.at(0), make_sample(66)));
   const auto* ring =
-      reinterpret_cast<const TelemetryRing*>(mapping.Data() + TelemetryOffset());
-  TEST_ASSERT(SameSample(ring->ring[2], MakeSample(66)));
+      reinterpret_cast<const TelemetryRing*>(mapping.Data() + telemetry_offset());
+  TEST_ASSERT(same_sample(ring->ring[2], make_sample(66)));
 
   // 空缓冲仍回答区间问题，但没有样本可交付。
   // A null buffer still answers the range question, but delivers no samples.
@@ -292,13 +317,13 @@ void TestSince(const Mapping& mapping)
   // dropped (caller capacity, not a history overwrite). The range is copied newest
   // first, so clamping drops the oldest end and tiny keeps the newest sample.
   std::array<Sample, 1> tiny = {};
-  writer.Write(MakeSample(67));
-  writer.Write(MakeSample(68));
+  writer.Write(make_sample(67));
+  writer.Write(make_sample(68));
   TEST_ASSERT(reader.Since(67, tiny.data(), tiny.size(), &result) == ErrorCode::OK);
   TEST_ASSERT(result.written == 1);
   TEST_ASSERT(result.dropped == 1);
   TEST_ASSERT(result.next == 69);
-  TEST_ASSERT(SameSample(tiny[0], MakeSample(68)));
+  TEST_ASSERT(same_sample(tiny.at(0), make_sample(68)));
 
   // 上一纪元留下的 last_seen（大于 head）是 gap，不是回绕出来的区间。
   // A last_seen from a previous epoch (larger than head) is a gap, not a wrapped range.
@@ -310,13 +335,14 @@ void TestSince(const Mapping& mapping)
 
 /// 6. region 的稳定读、失败重试的上限与 BUSY 判定。
 ///    Stable region reads, the retry budget and the BUSY verdict.
-void TestRegion(const Mapping& mapping)
+void test_region(const Mapping& mapping)
 {
   SharedPage page(mapping.Data());
   page.ClearHistory();
   auto reference = page.Region();
 
   Region snapshot = {};
+  TEST_ASSERT(reference.Read(static_cast<Region*>(nullptr)) == ErrorCode::PTR_NULL);
   TEST_ASSERT(reference.Read(&snapshot) == ErrorCode::OK);
   TEST_ASSERT(snapshot.seq.load() == 0);
   TestProtocolPayload decoded = {};
@@ -346,7 +372,7 @@ void TestRegion(const Mapping& mapping)
   TEST_ASSERT(decoded.cmd == 0);
   TEST_ASSERT(decoded.param_id == 0);
 
-  auto* region = reinterpret_cast<Region*>(mapping.Data() + RegionOffset());
+  auto* region = reinterpret_cast<Region*>(mapping.Data() + region_offset());
   TEST_ASSERT(reference.Raw() == region);
 
   // 伪造一次撕裂写的第一轮：写者已把索引提到 3，读者 `before` 读到 3、拷贝到新
@@ -382,10 +408,10 @@ void TestRegion(const Mapping& mapping)
 }
 
 /// 7. 访问单元页的单槽借还语义。Single-slot borrow semantics of the access-unit page.
-void TestAccessUnit()
+void test_access_unit()
 {
   const size_t access_bytes = sizeof(AccessUnit) + PAGE_SIZE;
-  Mapping mapping(access_bytes);
+  const Mapping mapping(access_bytes);
   auto* memory = mapping.Data();
 
   AccessUnitPage mailbox(memory);
@@ -398,7 +424,7 @@ void TestAccessUnit()
   std::array<uint8_t, 64> frame = {};
   for (uint32_t index = 0; index < frame.size(); ++index)
   {
-    frame[index] = static_cast<uint8_t>(index);
+    frame.at(index) = static_cast<uint8_t>(index);
   }
 
   auto* slot = reinterpret_cast<AccessUnit*>(memory);
@@ -426,7 +452,7 @@ void TestAccessUnit()
 
   // 写者覆写而不阻塞；读者拿到新的 seq。
   // The writer overwrites rather than blocking and the reader sees the new seq.
-  frame[0] = 0xAB;
+  frame.at(0) = 0xAB;
   TEST_ASSERT(
       mailbox.Publish(frame.data(), 16, AccessUnit::FORMAT_H264_ANNEX_B, 320, 240) == 2);
   const auto second = mailbox.Acquire();
@@ -472,17 +498,18 @@ void TestAccessUnit()
 
 int main()
 {
-  TestLayout();
+  test_layout();
+  test_unbound_page();
 
   {
-    Mapping mapping(PAGE_SIZE);
-    TestColdPageAndIndex(mapping);
-    TestForeignPage(mapping);
-    TestLatest(mapping);
-    TestSince(mapping);
-    TestRegion(mapping);
+    const Mapping mapping(PAGE_SIZE);
+    test_cold_page_and_index(mapping);
+    test_foreign_page(mapping);
+    test_latest(mapping);
+    test_since(mapping);
+    test_region(mapping);
   }
 
-  TestAccessUnit();
+  test_access_unit();
   return 0;
 }

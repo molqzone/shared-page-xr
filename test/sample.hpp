@@ -31,7 +31,7 @@ inline constexpr uint32_t SERVO_CHANNELS = 4;
  * than merely "not zero". The index also fills the four servo words, so a channel-count
  * change shows up here together with the static_assert.
  */
-inline LibXR::Sample MakeSample(uint32_t index)
+inline LibXR::Sample make_sample(uint32_t index)
 {
   LibXR::Sample sample = {};
   sample.ticks = 1000 + index;
@@ -61,7 +61,7 @@ inline LibXR::Sample MakeSample(uint32_t index)
  * Uses `memcmp` rather than field-by-field comparison: the struct's 2B tail padding is
  * part of the contract and a field-wise check would miss it.
  */
-inline bool SameSample(const LibXR::Sample& lhs, const LibXR::Sample& rhs)
+inline bool same_sample(const LibXR::Sample& lhs, const LibXR::Sample& rhs)
 {
   return std::memcmp(&lhs, &rhs, sizeof(LibXR::Sample)) == 0;
 }

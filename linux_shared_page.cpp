@@ -2,11 +2,15 @@
 
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/types.h>
 #include <unistd.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <utility>
 
-#include "timebase.hpp"
+#include "libxr.hpp"
+#include "shared_page.hpp"
 
 namespace LibXR
 {
@@ -18,7 +22,7 @@ LinuxSharedPage::Mapping LinuxSharedPage::Mapping::Open(uint64_t physical_addres
     return mapping;
   }
 
-  const long system_page_size = ::sysconf(_SC_PAGESIZE);
+  const int64_t system_page_size = ::sysconf(_SC_PAGESIZE);
   if (system_page_size <= 0)
   {
     return mapping;
@@ -158,7 +162,10 @@ bool LinuxSharedPage::Poll(uint64_t now_us)
 
 uint32_t LinuxSharedPage::Drain(TelemetryBatch* batch)
 {
-  ASSERT(batch != nullptr);
+  if (batch == nullptr)
+  {
+    return 0;
+  }
   *batch = {};
 
   if (!Ready())

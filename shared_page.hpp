@@ -6,8 +6,7 @@
 #include <cstring>
 #include <type_traits>
 
-#include "libxr_def.hpp"
-#include "topic.hpp"
+#include "libxr.hpp"
 
 /**
  * @file shared_page.hpp
@@ -133,10 +132,10 @@ struct AccessUnit
 };
 
 /// @brief In-page telemetry offset.
-inline constexpr size_t TelemetryOffset() { return 8; }
+inline constexpr size_t telemetry_offset() { return 8; }
 
 /// @brief In-page reference offset.
-inline constexpr size_t RegionOffset() { return PAGE_SIZE - sizeof(Region); }
+inline constexpr size_t region_offset() { return PAGE_SIZE - sizeof(Region); }
 
 /** @brief Shared-page header. */
 struct PageHeader
@@ -146,9 +145,9 @@ struct PageHeader
 };
 
 static_assert(offsetof(PageHeader, page_size) == 4, "PageHeader layout pinned");
-static_assert(TelemetryOffset() >= sizeof(PageHeader),
+static_assert(telemetry_offset() >= sizeof(PageHeader),
               "telemetry must not overlap header");
-static_assert(TelemetryOffset() + sizeof(TelemetryRing) <= RegionOffset(),
+static_assert(telemetry_offset() + sizeof(TelemetryRing) <= region_offset(),
               "telemetry ring and region must not overlap");
 
 /** @brief View of the telemetry ring. */
@@ -176,7 +175,7 @@ class Telemetry
 
   /**
    * @brief Copy samples after `last_seen`.
-   * @return `OK`, `EMPTY`, or `BUSY` when the writer stayed active.
+   * @return `OK`, `EMPTY`, `BUSY`, or `PTR_NULL` for an unbound view or null result.
    */
   [[nodiscard]] ErrorCode Since(uint32_t last_seen, Sample* samples, uint32_t capacity,
                                 SinceResult* result) const;

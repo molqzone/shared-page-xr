@@ -1,6 +1,10 @@
 #include "shared_page.hpp"
 
+#include <atomic>
+#include <cstdint>
 #include <cstring>
+
+#include "libxr.hpp"
 
 namespace LibXR
 {
@@ -22,8 +26,7 @@ void atomic_word_store(uint32_t* destination, uint32_t value)
 
 uint32_t atomic_word_load(const uint32_t* source)
 {
-  return std::atomic_ref<uint32_t>(const_cast<uint32_t&>(*source))
-      .load(std::memory_order_relaxed);
+  return std::atomic_ref<const uint32_t>(*source).load(std::memory_order_relaxed);
 }
 
 template <size_t Bytes>
@@ -48,7 +51,7 @@ void atomic_load(void* destination, const void* source)
   const auto* source_words = static_cast<const uint32_t*>(source);
   for (size_t index = 0; index < Bytes / sizeof(uint32_t); ++index)
   {
-    words[index] = std::atomic_ref<uint32_t>(const_cast<uint32_t&>(source_words[index]))
+    words[index] = std::atomic_ref<const uint32_t>(source_words[index])
                        .load(std::memory_order_relaxed);
   }
   std::memcpy(destination, words, Bytes);
@@ -110,8 +113,8 @@ void SharedPage::ClearHistory()
     return;
   }
 
-  auto* telemetry = reinterpret_cast<TelemetryRing*>(page_ + TelemetryOffset());
-  auto* reference = reinterpret_cast<LibXR::Region*>(page_ + RegionOffset());
+  auto* telemetry = reinterpret_cast<TelemetryRing*>(page_ + telemetry_offset());
+  auto* reference = reinterpret_cast<LibXR::Region*>(page_ + region_offset());
   if (!try_claim(telemetry->write_state))
   {
     return;
@@ -135,7 +138,7 @@ Telemetry::Telemetry(void* addr)
   }
 
   auto* telemetry =
-      reinterpret_cast<TelemetryRing*>(static_cast<uint8_t*>(addr) + TelemetryOffset());
+      reinterpret_cast<TelemetryRing*>(static_cast<uint8_t*>(addr) + telemetry_offset());
   head_ = &telemetry->head;
   state_ = &telemetry->write_state;
   ring_ = telemetry->ring;
@@ -143,8 +146,10 @@ Telemetry::Telemetry(void* addr)
 
 uint32_t Telemetry::Write(const Sample& sample)
 {
-  ASSERT(head_ != nullptr);
-  ASSERT(state_ != nullptr);
+  if (head_ == nullptr || state_ == nullptr || ring_ == nullptr)
+  {
+    return 0;
+  }
 
   uint32_t expected = 0;
   if (!state_->compare_exchange_strong(expected, 1, std::memory_order_acquire,
@@ -201,13 +206,16 @@ bool Telemetry::Latest(Sample* sample) const
 ErrorCode Telemetry::Since(uint32_t last_seen, Sample* samples, uint32_t capacity,
                            SinceResult* result) const
 {
-  ASSERT(result != nullptr);
-  ASSERT(head_ != nullptr);
-  ASSERT(state_ != nullptr);
-  ASSERT(ring_ != nullptr);
+  if (result == nullptr)
+  {
+    return ErrorCode::PTR_NULL;
+  }
 
-  result->written = 0;
-  result->dropped = 0;
+  *result = {};
+  if (head_ == nullptr || state_ == nullptr || ring_ == nullptr)
+  {
+    return ErrorCode::PTR_NULL;
+  }
 
   for (uint32_t attempt = 0; attempt < READ_RETRIES; ++attempt)
   {
@@ -275,14 +283,16 @@ uint32_t Telemetry::SeekToHead() const { return Head(); }
 Reference::Reference(void* addr)
     : region_(addr == nullptr ? nullptr
                               : reinterpret_cast<Region*>(static_cast<uint8_t*>(addr) +
-                                                          RegionOffset()))
+                                                          region_offset()))
 {
 }
 
 ErrorCode Reference::Read(Region* out, uint32_t retries) const
 {
-  ASSERT(out != nullptr);
-  ASSERT(region_ != nullptr);
+  if (out == nullptr || region_ == nullptr)
+  {
+    return ErrorCode::PTR_NULL;
+  }
 
   for (uint32_t attempt = 0; attempt < retries; ++attempt)
   {
@@ -314,9 +324,7 @@ uint32_t Reference::Seq() const
 
 uint32_t Reference::Write(const void* payload, size_t size)
 {
-  ASSERT(region_ != nullptr);
-
-  if (payload == nullptr || size > REGION_PAYLOAD_BYTES)
+  if (region_ == nullptr || payload == nullptr || size > REGION_PAYLOAD_BYTES)
   {
     return 0;
   }
@@ -342,16 +350,13 @@ bool SharedPage::Ready() const { return Check() == PageMagicKind::FORMATTED; }
 
 Telemetry SharedPage::TelemetryWriter() { return Telemetry(Data()); }
 
-Telemetry SharedPage::TelemetryWriter() const
-{
-  return Telemetry(const_cast<uint8_t*>(Data()));
-}
+Telemetry SharedPage::TelemetryWriter() const { return Telemetry(Data()); }
 
 Telemetry SharedPage::TelemetryReader() const { return TelemetryWriter(); }
 
 Reference SharedPage::Region() { return Reference(Data()); }
 
-Reference SharedPage::Region() const { return Reference(const_cast<uint8_t*>(Data())); }
+Reference SharedPage::Region() const { return Reference(Data()); }
 
 uint32_t SharedPage::WriteSample(const Sample& sample)
 {
@@ -485,9 +490,7 @@ AccessUnitPage::View AccessUnitPage::Acquire(uint32_t retries)
 
 AccessUnit* AccessUnitPage::Slot() const
 {
-  return Data() == nullptr
-             ? nullptr
-             : reinterpret_cast<AccessUnit*>(const_cast<uint8_t*>(Data()) + Offset());
+  return Data() == nullptr ? nullptr : reinterpret_cast<AccessUnit*>(Data() + Offset());
 }
 
 }  // namespace LibXR

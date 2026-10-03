@@ -23,26 +23,36 @@ CMakeLists.txt                STATIC target shared_page_xr，链接 libxr；Linu
 声明与实现分开：`.hpp` 保留契约与类声明，协议逻辑在 `.cpp` 的类型擦除引擎里（`detail::`），
 typed 层只是带 `static_assert` 的薄转发；wire 类型变多也不会复制协议实现。
 
-## wire 类型由应用注入
+## 帧格式是平台数据，载荷是应用数据，语义归本库
 
-本库只拥有**协议**：4 KiB 页、页头、64 槽遥测环、`head`/`seq`/`write_state` 的同步语义
-与 gap 规则。穿过页面的两个数据结构由应用以 POD 类型在**编译期**注入：
+三层各有其主：
+
+* **帧/几何**（页多大、多少槽、什么偏移）是**平台数据**：由平台内存图与 ABI 定
+  （例如 sophgo-sg200x-debian 的 `sg2002-ipc`：`CVIMMAP_RTOS_SHM_ADDR` 划区域，
+  `sg2002_rtos_shm_layout_line` 自描述页头）。编译期以 format traits 注入
+  （`LibXR::DocPageFormat` 只是 `inter-core-protocol.md` 定稿那4KiB/64 槽格式，不是
+  默认真理）；初始化期由**自描述页头逐项互验**——页头把每个几何数字写在页上，
+  照 `sg2002-ipc` `layout_line` 的做法，`Check()` 逐项比对，任何漂移报 `MISMATCH`，
+  绝不静默错读。
+* **载荷**（遥测采样、参考区 payload 的字段）是**应用数据**：以 POD 类型在编译期注入。
+* **同步语义**是本库的：keep-latest 遥测环、有界历史的 gap 规则、自洽区域快照、
+  `head`/`seq`/`write_state` 的 acquire-release 协议。
 
 ```cpp
 // 产品自己的契约头，双端 include 同一份
-struct Sample { uint64_t ticks; ... };   // 遥测采样，产品自定字段
-struct Command { ... };                  // 参考区 payload，产品自定字段
+using Format = LibXR::DocPageFormat;      // 平台几何；平台换几何时换 traits
+struct Sample { uint64_t ticks; ... };    // 遥测采样，产品自定字段
+struct Command { ... };                   // 参考区 payload，产品自定字段
 
-using Page = LibXR::SharedPage<Sample, Command, WIRE_TAG>;
+using Page = LibXR::SharedPage<Format, Sample, Command, WIRE_TAG>;
 ```
 
 * 类型约束（`PagePod`）：trivially copyable + standard layout；总长是 4 的倍数
   （逐字原子拷贝）。字段偏移与语义是**应用的契约**，用应用侧 `static_assert` 钉住。
-* 布局检查在**编译期**：环与区不重叠、`head`/`write_state`/`seq` 紧贴无填充、区落在
-  页尾、槽位 4B 对齐，全部由 `MakeLayout<T, P, TAG>()` 断言。
-* 双端互验在**初始化期**：`Format()` 把布局指纹（`sizeof`/`alignof`/槽位/页长/TAG 的
-  FNV-1a）写进页头，`Check()` 比对，对不上返回 `MISMATCH`，绝不静默错读。字段语义变了
-  而尺寸没变时，递增 `TAG` 让指纹跟着变。
+* 布局检查在**编译期**：环与区不重叠、计数器紧贴无填充、区落在页尾、槽位 4B 对齐，
+  全部由 `MakeLayout<F, T, P, TAG>()` 断言。
+* 双端互验在**初始化期**：页头记录 abi_version/页长/槽位/双端载荷尺寸/区偏移/TAG，
+  `Check()` 逐项比对。字段语义变了而尺寸没变时，递增 `TAG`；帧几何变了换 `Format`。
 * `TAG` 是产品侧的 wire 版本号；不传默认 0。
 
 两侧的代码形状各自最自然：
@@ -55,22 +65,22 @@ Command command = {};
 if (page.Region().Read(&command, &seq) == ErrorCode::OK) { /* 用 command */ }
 
 // Linux 侧 producer / recorder：LinuxSharedPage owns the /dev/mem mapping
-LibXR::LinuxSharedPage<Sample, Command> page(/* shared-page physical address */,
-                                             "telemetry", 1000);
+LibXR::LinuxSharedPage<Format, Sample, Command> page(/* shared-page physical address */,
+                                                     "telemetry", 1000);
 LibXR::Topic& telemetry = page;                  // module boundary
 page.Poll();                                     // 1kHz：drain 新区间发一组
 ```
 
-## 页布局（4 KiB，两侧均非缓存映射）
+## 页布局（页长/槽位随 format，两侧均非缓存映射）
 
 | 偏移 | 内容 |
 |---|---|
-| `0` | `PageHeader`：`magic = "SharedP1"`、`page_size = 4096`、`layout` 指纹 |
-| `16` | `TelemetryRing<T>`：`T ring[64]` + `head` + 写状态 |
+| `0` | `PageHeader`（自描述）：`magic`、`abi_version`、`page_size`、`slot_count`、`sample_size`、`payload_size`、`region_offset`、`tag` |
+| `sizeof(PageHeader)` | `TelemetryRing<T, SLOTS>`：`T ring[SLOTS]` + `head` + 写状态 |
 | `PAGE_SIZE - sizeof(Region<P>)` | `Region<P>`：`P payload` + 写状态 + `seq` |
 
-`head` 是**已发布条数**（单调，不回绕）；物理槽位 `head % 64`；最新采样
-`ring[(head-1) % 64]`；区间是半开区间 `(last_seen, head]`；`head - last_seen > 64`
+`head` 是**已发布条数**（单调，不回绕）；物理槽位 `head % SLOT_COUNT`；最新采样
+`ring[(head-1) % SLOT_COUNT]`；区间是半开区间 `(last_seen, head]`；`head - last_seen > SLOT_COUNT`
 时整段丢弃并记 gap（有界历史的固有竞态，详见契约第 3 节）。
 
 ## 同步原语
@@ -84,9 +94,11 @@ acquire/release；padding 中的写入状态覆盖 payload 的同步窗口。读
 
 ## 约束
 
-* **契约无独立版本号字段**：布局指纹 + 产品 `TAG` 承担互验，变更双端同步。加字段永远
-  是廉价操作，改已有字段偏移不是——改了就必须递增 `TAG` 并同步另一侧。
-* 页地址不进模块构造参数：Linux 侧经 yaml 配置注入，C906L 侧由链接脚本分配。
+* **契约无独立版本号字段**：页头自描述 + 产品 `TAG` 承担互验，变更双端同步。加字段永远
+  是廉价操作，改已有字段偏移不是——改了就必须递增 `TAG` 并同步另一侧；改帧几何就换
+  `Format` traits。
+* 页地址不进模块构造参数：Linux 侧经 yaml 配置注入，C906L 侧由链接脚本分配（平台
+  内存图数据，见 sophgo-sg200x-debian 的 `CVIMMAP_RTOS_SHM_ADDR`）。
 * `SharedPage` 继承 LibXR `Topic`；`LinuxSharedPage` 映射 Linux 物理页并发布 typed topic。
   两者都需要编译本仓库的 `.cpp`。
 
@@ -104,8 +116,9 @@ test/test_shared_page.cpp          页契约与发布索引
 test/test_linux_shared_page.cpp    适配器 + 真实 LibXR Topic
 ```
 
-测试用的 `Sample` 是 32B 的测试类型，不对应任何产品结构：它与产品尺寸不同，布局检查
-就证明了页布局跟着注入类型走，而不是被库写死。
+测试用的 `Sample` 是 32B 的测试类型、`Format` 是 2048B 页 / 32 槽的测试几何，均不对应
+任何产品定义：它们与产品不同，布局检查就证明了帧几何与载荷都跟着注入的 traits 与类型
+走，而不是被库写死。
 
 **平铺而不是一个接口一层目录**：本仓库只有两个头、两个测试文件，`libxr/test/automatic`
 那种镜像源码树的层级在这里只是额外跳转。等同一接口长到多个测试文件再拆，那时目录名取
@@ -127,9 +140,9 @@ cmake --preset debug && cmake --build --preset debug
 ctest --test-dir build-host -R "shared_page|linux_shared_page" --output-on-failure
 ```
 
-`test_shared_page.cpp`：布局与发布索引——`TelemetryRing`/`Region` 跟随注入类型的偏移
-与总长、`PageLayout` 摘要与 `MISMATCH` 互验、`Latest`/`Since` 的边界（64 槽余量、gap、
-新纪元）、region 稳定读与撕裂重试。
+`test_shared_page.cpp`：布局与发布索引——帧几何跟随注入 format、`TelemetryRing`/`Region`
+跟随注入类型的偏移与总长、页头自描述互验与 `MISMATCH`（TAG/载荷尺寸/帧几何漂移）、
+`Latest`/`Since` 的边界（SLOT_COUNT 槽余量、gap、新纪元）、region 稳定读与撕裂重试。
 `test_linux_shared_page.cpp`：驱动真实 LibXR `Topic`——节律门、一组遥测进回调订阅者、
 gap 后重新同步、以及由高层 payload 写入的参考区回读。
 

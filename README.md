@@ -12,11 +12,12 @@ SG2002 大小核（C606L Linux ↔ C606 RTOS）共享页传输。`SharedPage` �
 ## 组成
 
 ```text
-shared_page.hpp / .cpp        SharedPage : Topic；页契约（Sample / Region / AccessUnit）+
-                              Latest() / Since() / Region() / Acquire()。
+shared_page.hpp / .cpp        SharedPage : Topic；页契约（Sample / Region）+
+                              Latest() / Since() / Region()。
                               C606 控制环直接用
 linux_shared_page.hpp / .cpp  LinuxSharedPage : SharedPage：/dev/mem 映射 + drain → Topic
-CMakeLists.txt                STATIC target shared_page_xr，链接 libxr，无平台分支
+CMakeLists.txt                STATIC target shared_page_xr，链接 libxr；Linux drain 只在 Linux
+                              构建中编译
 ```
 
 声明与实现分开：`.hpp` 保留契约与类声明，实现放在 `.cpp`。
@@ -30,7 +31,7 @@ page.WriteSample(sample);                  // 写 ring + 推 head
 Region region = {};
 if (page.Region().Read(&region) == ErrorCode::OK) { /* 用 region.payload */ }
 
-// Linux 侧（RazverMaster / Recorder）：LinuxSharedPage owns the /dev/mem mapping
+// Linux 侧 producer / recorder：LinuxSharedPage owns the /dev/mem mapping
 LibXR::LinuxSharedPage page(/* shared-page physical address */, "telemetry", 1000);
 LibXR::Topic& telemetry = page;      // module boundary
 page.Poll();                         // 1kHz：drain 新区间并发一组
@@ -48,7 +49,7 @@ page.Poll();                         // 1kHz：drain 新区间并发一组
 `ring[(head-1) % 64]`；区间是半开区间 `(last_seen, head]`；`head - last_seen > 64`
 时整段丢弃并记 gap（有界历史的固有竞态，详见契约第 3 节）。
 
-`Sample` 32B，单位是**硬件原生宽度**：IMU 为传感器原始 LSB、舵机为
+`Sample` 40B，单位是**硬件原生宽度**：IMU 为传感器原始 LSB、舵机为
 硬件命令字、tick 为 `rdtime` 原始计数。满量程刻度属 action 仓库的 IMU 驱动配置，
 不焊进本契约。
 
@@ -63,21 +64,6 @@ acquire/release；padding 中的写入状态覆盖 payload 的同步窗口。读
 问题，两者正交。
 
 不需要 futex、描述符队列或异步状态机，也不需要 dcache clean/invalidate。
-
-## 访问单元页（独立映射）
-
-遥测/参考页之外还有一页 `AccessUnitPage`：单槽「最新帧」语义，magic/seq/借还语义
-从 `camera_mailbox` 收进契约，命名空间单例消失。`Publish()` 填 payload 后 release
-bump `seq`；`Acquire()` acquire 比对后返回只读视图并清 `ready`，读者慢时写者直接
-覆写旧帧（丢帧而不阻塞），与 keep-latest 订阅一致。Linux 侧的自留缓冲区按此发布，
-C606 侧用 `Acquire()` 取。
-
-**契约没有 CRC**：旧 `camera_mailbox` 的 CRC32 承担的两个职责——覆写中的撕裂读、
-旧进程遗留的脏帧——在本契约里分别由 `seq` 双重读（比对 4B 索引，不是扫 512KB）和
-启动语义（页 magic + `ClearHistory()` + `last_seen > head` 判 gap）覆盖，且它连自己
-名义上的用例都没覆盖：View 是页内零拷贝指针，持有期间写者覆写会连 CRC 字段一起改写，
-没有任何人会在持有期间复检。两核直写直读共享 DDR 没有引入比特翻转的搬运环节，
-位翻转也不该由这一层用整帧扫描兜。H.264 自身有容错，丢帧归上层。
 
 ## 约束
 
@@ -122,9 +108,9 @@ ctest --test-dir build-host -R "shared_page|linux_shared_page" --output-on-failu
 ```
 
 `test_shared_page.cpp`：布局与发布索引——`Sample`/`Region` 的字段偏移与总长、`Latest` /
-`Since` 的边界（64 槽余量、gap、新纪元）、region 稳定读与撕裂重试、访问单元页的借还
-语义。`test_linux_shared_page.cpp`：驱动真实 LibXR `Topic`——节律门、一组遥测进回调
-订阅者、gap 后重新同步、以及由高层 payload 写入的参考区回读。
+`Since` 的边界（64 槽余量、gap、新纪元）、region 稳定读与撕裂重试。
+`test_linux_shared_page.cpp`：驱动真实 LibXR `Topic`——节律门、一组遥测进回调订阅者、
+gap 后重新同步、以及由高层 payload 写入的参考区回读。
 
 ### 已知待办
 

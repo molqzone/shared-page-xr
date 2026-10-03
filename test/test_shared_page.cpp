@@ -9,7 +9,6 @@
  *   3. `Since()` 的区间语义：追平、上界 64 槽、gap、新纪元（head 回退）。
  *   4. 页校验：冷页 / 被格式化 / 外来数据。
  *   5. region 的写-读一致性：稳定路径、撕裂重试、BUSY。
- *   6. 访问单元页的单槽「最新帧」借还语义。
  *
  * 运行前提 / Setup: 无。页由匿名映射提供，不需要 `/dev/mem`、root 或任何设备，所以
  * 这套契约在主机上就能验证。
@@ -33,7 +32,6 @@
 #include <cstring>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 #include "libxr_def.hpp"
 #include "sample.hpp"
@@ -407,93 +405,6 @@ void test_region(const Mapping& mapping)
   region->write_state.store(0, std::memory_order_release);
 }
 
-/// 7. 访问单元页的单槽借还语义。Single-slot borrow semantics of the access-unit page.
-void test_access_unit()
-{
-  const size_t access_bytes = sizeof(AccessUnit) + PAGE_SIZE;
-  const Mapping mapping(access_bytes);
-  auto* memory = mapping.Data();
-
-  AccessUnitPage mailbox(memory);
-  TEST_ASSERT(mailbox.Check() == PageMagicKind::UNFORMATTED);
-  mailbox.Format();
-  TEST_ASSERT(mailbox.Check() == PageMagicKind::FORMATTED);
-
-  TEST_ASSERT(!mailbox.Acquire().Valid());
-
-  std::array<uint8_t, 64> frame = {};
-  for (uint32_t index = 0; index < frame.size(); ++index)
-  {
-    frame.at(index) = static_cast<uint8_t>(index);
-  }
-
-  auto* slot = reinterpret_cast<AccessUnit*>(memory);
-  slot->write_state.store(1, std::memory_order_release);
-  TEST_ASSERT(mailbox.Publish(frame.data(), 1, 1, 1, 1) == 0);
-  TEST_ASSERT(!mailbox.Acquire().Valid());
-  slot->write_state.store(0, std::memory_order_release);
-
-  TEST_ASSERT(
-      mailbox.Publish(frame.data(), 48, AccessUnit::FORMAT_H264_ANNEX_B, 640, 480) == 1);
-
-  const uint32_t length = 48;
-  const auto view = mailbox.Acquire();
-  TEST_ASSERT(view.Valid());
-  TEST_ASSERT(view.length == length);
-  TEST_ASSERT(view.format == AccessUnit::FORMAT_H264_ANNEX_B);
-  TEST_ASSERT(view.width == 640);
-  TEST_ASSERT(view.height == 480);
-  TEST_ASSERT(view.seq == 1);
-  TEST_ASSERT(std::memcmp(view.data, frame.data(), length) == 0);
-
-  // 借出一次即清 ready：同一帧不会被消费两次。
-  // One take clears ready, so one frame is consumed once.
-  TEST_ASSERT(!mailbox.Acquire().Valid());
-
-  // 写者覆写而不阻塞；读者拿到新的 seq。
-  // The writer overwrites rather than blocking and the reader sees the new seq.
-  frame.at(0) = 0xAB;
-  TEST_ASSERT(
-      mailbox.Publish(frame.data(), 16, AccessUnit::FORMAT_H264_ANNEX_B, 320, 240) == 2);
-  const auto second = mailbox.Acquire();
-  TEST_ASSERT(second.Valid());
-  TEST_ASSERT(second.seq == 2);
-  TEST_ASSERT(second.length == 16);
-  TEST_ASSERT(second.width == 320);
-  TEST_ASSERT(second.data[0] == 0xAB);
-
-  // 契约不设 CRC：取帧即热路径，没有校验参数（一致性由 seq 双重读保证）。
-  // The contract carries no CRC: the take is the hot path with no check parameter
-  // (coherence comes from the double read of seq).
-  TEST_ASSERT(
-      mailbox.Publish(frame.data(), 16, AccessUnit::FORMAT_H264_ANNEX_B, 320, 240) == 3);
-  const auto third = mailbox.Acquire();
-  TEST_ASSERT(third.Valid());
-  TEST_ASSERT(third.seq == 3);
-  TEST_ASSERT(third.data[0] == 0xAB);
-
-  // 越界与空指针被拒绝，而不是截断。
-  // Oversized and null publishes are rejected, not truncated.
-  TEST_ASSERT(mailbox.Publish(frame.data(), AccessUnit::MAX_BYTES + 1, 1, 1, 1) == 0);
-  TEST_ASSERT(mailbox.Publish(nullptr, 8, 1, 1, 1) == 0);
-
-  // 正好到上界的发布被接受（边界是 `> MAX`）。
-  // A publish exactly at the limit is accepted: the bound is `> MAX`.
-  std::vector<uint8_t> full_frame(AccessUnit::MAX_BYTES, 0x5AU);
-  TEST_ASSERT(mailbox.Publish(full_frame.data(), AccessUnit::MAX_BYTES, 1, 2, 3) == 4);
-  const auto full = mailbox.Acquire();
-  TEST_ASSERT(full.Valid());
-  TEST_ASSERT(full.length == AccessUnit::MAX_BYTES);
-  TEST_ASSERT(full.data[AccessUnit::MAX_BYTES - 1] == 0x5AU);
-
-  // 头部在页首，payload 紧随其后。
-  // The header occupies the start of the page and the payload follows it.
-  const auto* slot_view = reinterpret_cast<const AccessUnit*>(memory);
-  TEST_ASSERT(slot_view->magic == ACCESS_UNIT_MAGIC);
-  TEST_ASSERT(reinterpret_cast<const uint8_t*>(slot_view->payload) ==
-              memory + offsetof(AccessUnit, payload));
-}
-
 }  // namespace
 
 int main()
@@ -510,6 +421,5 @@ int main()
     test_region(mapping);
   }
 
-  test_access_unit();
   return 0;
 }

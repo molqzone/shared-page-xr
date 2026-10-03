@@ -21,23 +21,11 @@ inline constexpr size_t PAGE_SIZE = 4096;
 /// @brief Page header magic.
 inline constexpr uint32_t PAGE_MAGIC = 0x31506461U;  // NOLINT
 
-/// @brief Access-unit slot magic.
-inline constexpr uint32_t ACCESS_UNIT_MAGIC = 0x31786F42U;  // NOLINT
-
 /// @brief Telemetry ring capacity.
 inline constexpr uint32_t TELEMETRY_SLOTS = 64;
 
-/// @brief Maximum access-unit payload size.
-inline constexpr uint32_t MAILBOX_BYTES = 512 * 1024;
-
 /// @brief Bytes available to the higher-layer region payload.
 inline constexpr size_t REGION_PAYLOAD_BYTES = 24;
-
-/// @brief Unknown access-unit format.
-inline constexpr uint32_t ACCESS_UNIT_FORMAT_UNKNOWN = 0;
-
-/// @brief H.264 Annex-B access-unit format.
-inline constexpr uint32_t ACCESS_UNIT_FORMAT_H264_ANNEX_B = 1;
 
 /** @brief One control-loop telemetry sample.
  *
@@ -108,28 +96,6 @@ static_assert(offsetof(Region, write_state) == 24, "Region::write_state offset p
 static_assert(offsetof(Region, seq) == 28, "Region::seq offset pinned");
 static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t),
               "Region::seq must occupy exactly 4 bytes for the pinned offset to hold");
-
-/** @brief Single-slot latest-frame access-unit mailbox. */
-struct AccessUnit
-{
-  uint32_t magic;
-  uint32_t format;
-  uint32_t width;
-  uint32_t height;
-  std::atomic<uint32_t> seq;
-  std::atomic<uint32_t> length;
-  std::atomic<uint32_t> ready;
-  std::atomic<uint32_t> write_state;
-  uint8_t payload[MAILBOX_BYTES];
-
-  /// @brief Maximum payload size.
-  static constexpr uint32_t MAX_BYTES = MAILBOX_BYTES;
-
-  /// @brief Unknown format.
-  static constexpr uint32_t FORMAT_UNKNOWN = ACCESS_UNIT_FORMAT_UNKNOWN;
-  /// @brief H.264 Annex-B format.
-  static constexpr uint32_t FORMAT_H264_ANNEX_B = ACCESS_UNIT_FORMAT_H264_ANNEX_B;
-};
 
 /// @brief In-page telemetry offset.
 inline constexpr size_t telemetry_offset() { return 8; }
@@ -289,54 +255,6 @@ class SharedPage : public Topic
   [[nodiscard]] bool Latest(Sample* sample) const;
 
  private:
-  uint8_t* page_ = nullptr;
-};
-
-/** @brief View of the separately mapped access-unit page. */
-class AccessUnitPage
-{
- public:
-  AccessUnitPage() = default;
-
-  /// @brief Bind one mapped page.
-  explicit AccessUnitPage(void* addr);
-
-  [[nodiscard]] bool Valid() const;
-  [[nodiscard]] uint8_t* Data() const;
-
-  /** @brief Borrowed access-unit view. */
-  struct View
-  {
-    const uint8_t* data = nullptr;
-    uint32_t length = 0;
-    uint32_t format = 0;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t seq = 0;
-
-    /// @brief Return whether the view contains data.
-    [[nodiscard]] bool Valid() const { return data != nullptr && length > 0; }
-  };
-
-  /// @brief In-page access-unit offset.
-  static constexpr size_t Offset() { return 0; }
-
-  /// @brief Format the access-unit page.
-  void Format();
-
-  /// @brief Validate the access-unit page.
-  [[nodiscard]] PageMagicKind Check() const;
-
-  /// @brief Publish an access unit. Returns the new sequence, or zero on failure.
-  uint32_t Publish(const void* data, uint32_t length, uint32_t format, uint32_t width,
-                   uint32_t height);
-
-  /// @brief Acquire the latest borrowed access unit.
-  [[nodiscard]] View Acquire(uint32_t retries = 8);
-
- private:
-  [[nodiscard]] AccessUnit* Slot() const;
-
   uint8_t* page_ = nullptr;
 };
 

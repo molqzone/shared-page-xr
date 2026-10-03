@@ -99,6 +99,13 @@ acquire/release；padding 中的写入状态覆盖 payload 的同步窗口。读
 
 不需要 futex、描述符队列或异步状态机，也不需要 dcache clean/invalidate。
 
+**写者死亡**：写者死在 claim 窗口里（进程被杀/固件崩溃）会让 `write_state` 永久
+占用，读者从此只拿 `BUSY`。机制是 `SharedPage::RecoverStaleClaims()`（只破 claim，
+不动 `head`/`seq`/数据——未发布完的槽位在 `head` 之外，不丢历史、不漏撕裂数据）；
+策略由带时钟的一侧执行：Linux 适配器的 `Drain()` 在持续 `BUSY` 超过
+`STALE_CLAIM_TIMEOUT_US`（10ms，远大于正常 claim 窗口）后自动破除并重同步，固件侧
+消费者从自己的健康检查调同一机制。
+
 ## 约束
 
 * **契约无独立版本号字段**：页头自描述 + 产品 `TAG` 承担互验，变更双端同步。加字段永远

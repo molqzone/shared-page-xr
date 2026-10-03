@@ -27,6 +27,10 @@ namespace LibXR
 /// @brief Default telemetry topic name.
 inline constexpr const char* TELEMETRY_TOPIC_NAME = "telemetry";
 
+/// @brief A `write_state` claim held longer than this means the writer died inside
+///        the claim window (the live claim lasts a few stores).
+inline constexpr uint64_t STALE_CLAIM_TIMEOUT_US = 10000;
+
 /**
  * @brief A batch drained from the telemetry ring.
  */
@@ -180,6 +184,14 @@ class LinuxSharedPage : public SharedPage<F, T, P, TAG>
 
   /**
    * @brief Drain the next telemetry batch without publishing it.
+   *
+   * 写者死在 claim 窗口里时 `Since()` 会永久 `BUSY`；持续 BUSY 超过
+   * `STALE_CLAIM_TIMEOUT_US` 即判定写者死亡，破 claim 后当场重试一次。历史不受
+   * 影响：未发布完的槽位在 `head` 之外，不会漏出。
+   * A writer dying inside the claim window makes `Since()` return `BUSY` forever;
+   * `BUSY` held past `STALE_CLAIM_TIMEOUT_US` is taken as a dead writer, the claim
+   * is broken and the drain retries once. History survives: the in-flight slot
+   * lives beyond `head` and never leaks.
    */
   uint32_t Drain(Batch* batch)
   {
@@ -195,12 +207,29 @@ class LinuxSharedPage : public SharedPage<F, T, P, TAG>
     }
 
     SinceResult result = {};
-    const ErrorCode status =
+    ErrorCode status =
         this->TelemetryReader().Since(last_seen_, batch->ring, F::SLOT_COUNT, &result);
     if (status == ErrorCode::BUSY)
     {
-      return 0;
+      const uint64_t now_us = static_cast<uint64_t>(Timebase::GetMicroseconds());
+      if (!busy_tracking_)
+      {
+        busy_tracking_ = true;
+        busy_since_us_ = now_us;
+      }
+      else if (now_us - busy_since_us_ > STALE_CLAIM_TIMEOUT_US)
+      {
+        busy_tracking_ = false;
+        this->RecoverStaleClaims();
+        status =
+            this->TelemetryReader().Since(last_seen_, batch->ring, F::SLOT_COUNT, &result);
+      }
+      if (status == ErrorCode::BUSY)
+      {
+        return 0;
+      }
     }
+    busy_tracking_ = false;
 
     last_seen_ = result.next;
 
@@ -227,6 +256,8 @@ class LinuxSharedPage : public SharedPage<F, T, P, TAG>
   Doorbell doorbell_;
   detail::LinuxMapping mapping_;
   uint32_t last_seen_ = 0;
+  uint64_t busy_since_us_ = 0;
+  bool busy_tracking_ = false;
 };
 
 }  // namespace LibXR

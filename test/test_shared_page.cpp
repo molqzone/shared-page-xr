@@ -11,6 +11,8 @@
  *   4. 页校验：冷页 / 被格式化 / 外来数据 / 双端契约漂移（TAG、载荷尺寸、帧几何，
  *      均报 MISMATCH）。
  *   5. region 的写-读一致性：稳定路径、撕裂重试、BUSY。
+ *   6. 写者死亡恢复：claim 窗口内死亡的写者由 `RecoverStaleClaims()` 破除占用，
+ *      历史与未发布槽位都不受污染。
  *
  * 运行前提 / Setup: 无。页由匿名映射提供，不需要 `/dev/mem`、root 或任何设备，所以
  * 这套契约在主机上就能验证。
@@ -491,6 +493,55 @@ void test_region(const Mapping& mapping)
   region->write_state.store(0, std::memory_order_release);
 }
 
+/// 8. 写者死在 claim 窗口里：持续占用由 `RecoverStaleClaims()` 破除，历史不丢。
+///    A writer dead inside the claim window: `RecoverStaleClaims()` breaks the stuck
+///    claims and the history survives.
+void test_stale_claims(const Mapping& mapping)
+{
+  TestPage page(mapping.Data());
+  page.ClearHistory();
+  auto writer = page.TelemetryWriter();
+  writer.Write(make_sample(0));
+  writer.Write(make_sample(1));
+
+  auto* telemetry_ring =
+      reinterpret_cast<TelemetryRing<Sample, TestFormat::SLOT_COUNT>*>(
+          mapping.Data() + telemetry_offset());
+  auto* region = reinterpret_cast<Region<TestProtocolPayload>*>(
+      mapping.Data() + region_offset<TestFormat, TestProtocolPayload>());
+
+  // 写者死在 claim 窗口：两个 claim 都永久留在占用态。
+  // The writer died inside the claim window: both claims stay taken forever.
+  telemetry_ring->write_state.store(1, std::memory_order_release);
+  region->write_state.store(1, std::memory_order_release);
+
+  Sample sample = {};
+  TestProtocolPayload payload = {};
+  TEST_ASSERT(page.WriteSample(make_sample(2)) == 0);
+  TEST_ASSERT(page.Region().Write(payload) == 0);
+  const auto reader = page.TelemetryReader();
+  std::array<Sample, 4> out = {};
+  SinceResult result = {};
+  TEST_ASSERT(reader.Since(0, out.data(), out.size(), &result) == ErrorCode::BUSY);
+  TEST_ASSERT(reader.Latest(&sample) == false);
+  TEST_ASSERT(page.Region().Read(&payload, nullptr) == ErrorCode::BUSY);
+
+  page.RecoverStaleClaims();
+
+  // 历史不受影响（head/seq 没动），读写全部恢复。
+  // History survives (head/seq untouched) and both directions work again.
+  TEST_ASSERT(reader.Head() == 2);
+  TEST_ASSERT(reader.Since(0, out.data(), out.size(), &result) == ErrorCode::OK);
+  TEST_ASSERT(result.written == 2);
+  TEST_ASSERT(same_sample(out.at(0), make_sample(0)));
+  TEST_ASSERT(same_sample(out.at(1), make_sample(1)));
+  TEST_ASSERT(page.WriteSample(make_sample(2)) == 3);
+  TEST_ASSERT(reader.Latest(&sample));
+  TEST_ASSERT(same_sample(sample, make_sample(2)));
+  TEST_ASSERT(page.Region().Write(payload) == 1);
+  TEST_ASSERT(page.Region().Read(&payload, nullptr) == ErrorCode::OK);
+}
+
 }  // namespace
 
 int main()
@@ -506,6 +557,7 @@ int main()
     test_latest(mapping);
     test_since(mapping);
     test_region(mapping);
+    test_stale_claims(mapping);
   }
 
   return 0;

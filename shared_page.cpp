@@ -376,5 +376,21 @@ void PageCore::ClearHistory()
   region_state->store(0, std::memory_order_release);
   telemetry_state->store(0, std::memory_order_release);
 }
+
+void PageCore::RecoverStaleClaims()
+{
+  if (page_ == nullptr)
+  {
+    return;
+  }
+
+  auto* telemetry_state = reinterpret_cast<std::atomic<uint32_t>*>(
+      page_ + telemetry_offset() +
+      static_cast<size_t>(layout_.sample_size) * layout_.slot_count + sizeof(uint32_t));
+  auto* region_state = reinterpret_cast<std::atomic<uint32_t>*>(
+      page_ + layout_.region_offset + layout_.payload_size);
+  telemetry_state->store(0, std::memory_order_release);
+  region_state->store(0, std::memory_order_release);
+}
 }  // namespace detail
 }  // namespace LibXR

@@ -265,6 +265,7 @@ class PageCore
   [[nodiscard]] PageMagicKind Check() const;
   void Format();
   void ClearHistory();
+  void RecoverStaleClaims();
 
  private:
   uint8_t* page_ = nullptr;
@@ -412,6 +413,24 @@ class SharedPage : public Topic
 
   /// @brief Return whether the page is ready.
   [[nodiscard]] bool Ready() const { return Check() == PageMagicKind::FORMATTED; }
+
+  /** @brief Break write-state claims left behind by a dead peer writer.
+   *
+   * 写者在 claim 窗口内死亡（进程被杀/固件崩溃）会把 `write_state` 永久留在占用态，
+   * 读者从此只拿到 `BUSY`。本操作只清两个 claim，不动 `head`/`seq`/数据：未发布完的
+   * 槽位在 `head` 之外，读者看不到，所以破 claim 不会漏出撕裂数据，也不需要丢历史。
+   * 调用者带时钟判断"持续 BUSY 超阈值 = 写者已死"（见 Linux 适配器的 Drain）；写者
+   * 只是短暂持有 claim 时必须用正常路径，不要调本函数。
+   *
+   * A writer dying inside the claim window (killed process, crashed firmware) leaves
+   * `write_state` claimed forever and readers get `BUSY` from then on. This only
+   * breaks the two claims; `head`/`seq`/data are untouched: the in-flight slot lives
+   * beyond `head` and is invisible to readers, so breaking the claim exposes no torn
+   * data and loses no history. Callers own the clock and the "BUSY for longer than a
+   * threshold means the writer is dead" verdict (see the Linux adapter's Drain);
+   * while a live writer merely holds the claim, use the normal paths instead.
+   */
+  void RecoverStaleClaims() { core_.RecoverStaleClaims(); }
 
   /// @brief Return the telemetry writer view.
   [[nodiscard]] Telemetry<T> TelemetryWriter() const

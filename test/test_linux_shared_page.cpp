@@ -268,6 +268,10 @@ int main()
   TEST_ASSERT(epoch_adapter.Drain(&busy_batch) == 0);
   TEST_ASSERT(epoch_adapter.LastSeen() == 82);
   telemetry_ring->write_state.store(0, std::memory_order_release);
+  // 释放后再 drain 一次：走非 BUSY 路径，把卡死跟踪器复位成确定状态。
+  // One more drain after the release: the non-BUSY path resets the stale-claim
+  // tracker to a deterministic state.
+  TEST_ASSERT(epoch_adapter.Drain(&busy_batch) == 0);
 
   // 4. 参考/命令下行：独立页视图回读，seq 递增。
   // The reference/command downlink: read back through an independent page view,
@@ -303,6 +307,22 @@ int main()
   ringer.Ring();
   TEST_ASSERT(!cold_adapter.WaitAndPublish(0));
   TEST_ASSERT(capture.calls == 5);
+
+  // 6. 写者死在 claim 窗口里：持续 BUSY 超阈值后自动破 claim 重同步，历史不丢。
+  // A writer dead inside the claim window: `BUSY` past the threshold breaks the
+  // claim and resynchronises, with the history intact.
+  writer.Write(make_sample(82));
+  telemetry_ring->write_state.store(1, std::memory_order_release);
+  ringer.Ring();
+  TEST_ASSERT(!epoch_adapter.WaitAndPublish(0));
+  TEST_ASSERT(capture.calls == 5);
+  ::usleep(2 * STALE_CLAIM_TIMEOUT_US);
+  ringer.Ring();
+  TEST_ASSERT(epoch_adapter.WaitAndPublish(0));
+  TEST_ASSERT(capture.calls == 6);
+  TEST_ASSERT(capture.last.count == 1);
+  TEST_ASSERT(same_sample(capture.last.ring[0], make_sample(82)));
+  TEST_ASSERT(epoch_adapter.LastSeen() == 83);
 
   return 0;
 }

@@ -65,11 +65,12 @@ TelemetryCore::TelemetryCore(void* addr, const PageLayout& layout)
 
   head_ = reinterpret_cast<std::atomic<uint32_t>*>(
       static_cast<uint8_t*>(addr) + telemetry_offset() +
-      static_cast<size_t>(layout.sample_size) * TELEMETRY_SLOTS);
+      static_cast<size_t>(layout.sample_size) * layout.slot_count);
   state_ = reinterpret_cast<std::atomic<uint32_t>*>(
       reinterpret_cast<uint8_t*>(head_) + sizeof(uint32_t));
   ring_ = static_cast<uint8_t*>(addr) + telemetry_offset();
   stride_ = layout.sample_size;
+  slots_ = layout.slot_count;
 }
 
 uint32_t TelemetryCore::Write(const void* sample)
@@ -87,8 +88,7 @@ uint32_t TelemetryCore::Write(const void* sample)
   }
 
   const uint32_t head = head_->load(std::memory_order_relaxed);
-  atomic_copy(ring_ + static_cast<size_t>(head % TELEMETRY_SLOTS) * stride_, sample,
-              stride_);
+  atomic_copy(ring_ + static_cast<size_t>(head % slots_) * stride_, sample, stride_);
   head_->store(head + 1, std::memory_order_release);
   state_->store(0, std::memory_order_release);
   return head + 1;
@@ -119,8 +119,7 @@ bool TelemetryCore::Latest(void* out) const
       return false;
     }
 
-    const uint8_t* slot =
-        ring_ + static_cast<size_t>((head - 1) % TELEMETRY_SLOTS) * stride_;
+    const uint8_t* slot = ring_ + static_cast<size_t>((head - 1) % slots_) * stride_;
     atomic_load_bytes(out, slot, stride_);
     const uint32_t after = head_->load(std::memory_order_acquire);
     if (after == head && state_->load(std::memory_order_acquire) == 0)
@@ -161,7 +160,7 @@ ErrorCode TelemetryCore::Since(uint32_t last_seen, void* out, uint32_t capacity,
     }
 
     const uint32_t count = head - last_seen;
-    if (count > TELEMETRY_SLOTS)
+    if (count > slots_)
     {
       const uint32_t after = head_->load(std::memory_order_acquire);
       if (after != head || state_->load(std::memory_order_acquire) != 0)
@@ -180,8 +179,8 @@ ErrorCode TelemetryCore::Since(uint32_t last_seen, void* out, uint32_t capacity,
       for (uint32_t index = 0; index < written; ++index)
       {
         atomic_load_bytes(samples + static_cast<size_t>(index) * stride_,
-                          ring_ + static_cast<size_t>((head - 1 - index) % TELEMETRY_SLOTS) *
-                                      stride_,
+                          ring_ +
+                              static_cast<size_t>((head - 1 - index) % slots_) * stride_,
                           stride_);
       }
       for (uint32_t first = 0, last = written == 0 ? 0 : written - 1; first < last;
@@ -300,19 +299,23 @@ PageMagicKind PageCore::Check() const
   const auto* header = reinterpret_cast<const PageHeader*>(page_);
   if (header->magic == PAGE_MAGIC)
   {
-    if (header->page_size == PAGE_SIZE && header->layout == layout_.fingerprint)
-    {
-      return PageMagicKind::FORMATTED;
-    }
-    // 魔术字对但布局指纹不对：双端用了不同版本的 wire 结构。
-    // Right magic but wrong layout fingerprint: the two ends disagree on the wire
-    // structure.
-    return header->page_size == PAGE_SIZE ? PageMagicKind::MISMATCH
-                                          : PageMagicKind::FOREIGN;
+    // 逐项互验，与 sg2002_ipc 的 layout_line 检查同构：任何数字对不上都说明双端
+    // 帧或 wire 结构漂移，绝不静默错读。
+    // Field-by-field cross-check, mirroring the sg2002_ipc layout_line validation: any
+    // number that does not match means frame or wire-structure drift between the two
+    // ends, and must never be silently misread.
+    const bool matches =
+        header->abi_version == layout_.abi_version &&
+        header->page_size == layout_.page_size &&
+        header->slot_count == layout_.slot_count &&
+        header->sample_size == layout_.sample_size &&
+        header->payload_size == layout_.payload_size &&
+        header->region_offset == layout_.region_offset && header->tag == layout_.tag;
+    return matches ? PageMagicKind::FORMATTED : PageMagicKind::MISMATCH;
   }
 
   // A zero page is unformatted; any other invalid header is foreign.
-  for (size_t i = 0; i < PAGE_SIZE; ++i)
+  for (size_t i = 0; i < layout_.page_size; ++i)
   {
     if (page_[i] != 0)
     {
@@ -329,11 +332,16 @@ void PageCore::Format()
     return;
   }
 
-  std::memset(page_, 0, PAGE_SIZE);
+  std::memset(page_, 0, layout_.page_size);
   auto* header = reinterpret_cast<PageHeader*>(page_);
   header->magic = PAGE_MAGIC;
-  header->page_size = PAGE_SIZE;
-  header->layout = layout_.fingerprint;
+  header->abi_version = layout_.abi_version;
+  header->page_size = layout_.page_size;
+  header->slot_count = layout_.slot_count;
+  header->sample_size = layout_.sample_size;
+  header->payload_size = layout_.payload_size;
+  header->region_offset = layout_.region_offset;
+  header->tag = layout_.tag;
 }
 
 void PageCore::ClearHistory()
@@ -344,8 +352,8 @@ void PageCore::ClearHistory()
   }
 
   auto* head = reinterpret_cast<std::atomic<uint32_t>*>(
-      page_ + telemetry_offset() + static_cast<size_t>(layout_.sample_size) *
-                                       TELEMETRY_SLOTS);
+      page_ + telemetry_offset() +
+      static_cast<size_t>(layout_.sample_size) * layout_.slot_count);
   auto* telemetry_state =
       reinterpret_cast<std::atomic<uint32_t>*>(reinterpret_cast<uint8_t*>(head) +
                                                sizeof(uint32_t));

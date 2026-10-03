@@ -27,6 +27,19 @@
 
 namespace LibXRTest
 {
+/** @brief 测试帧格式：刻意取 2048B 页 / 32 槽，与 `DocPageFormat` 的 4096B / 64
+ *  槽不同——页几何跟着注入的 format 走，不是库常量。
+ *  Test frame format: deliberately a 2048B page with 32 slots, unlike
+ *  `DocPageFormat`'s 4096B/64, so the page geometry demonstrably follows the
+ *  injected format rather than library constants.
+ */
+struct Format
+{
+  static constexpr uint32_t ABI_VERSION = 1;
+  static constexpr size_t PAGE_SIZE = 2048;
+  static constexpr uint32_t SLOT_COUNT = 32;
+};
+
 /// @brief 舵机通道数（测试采样取 2 路，产品自定）。Servo channels of the test sample.
 inline constexpr uint32_t SERVO_CHANNELS = 2;
 

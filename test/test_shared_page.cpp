@@ -3,11 +3,13 @@
  * @brief `shared_page.hpp` 的契约测试 / Contract tests for `shared_page.hpp`.
  *
  * 测什么 / Checks:
- *   1. 双端编译依赖的数字：`TelemetryRing` / `Region` 跟随注入类型的字段偏移与总长、
- *      页内各区偏移、`PageLayout` 摘要。
- *   2. 发布索引：`head` 计数、物理槽位 `head % 64`、最新为 `ring[(head-1) % 64]`。
- *   3. `Since()` 的区间语义：追平、上界 64 槽、gap、新纪元（head 回退）。
- *   4. 页校验：冷页 / 被格式化 / 外来数据 / 双端 wire 结构不一致（MISMATCH）。
+ *   1. 双端编译依赖的数字：帧几何跟随注入的 format，`TelemetryRing` / `Region`
+ *      跟随注入类型的字段偏移与总长、页内各区偏移、`PageLayout` 与页头同源。
+ *   2. 发布索引：`head` 计数、物理槽位 `head % SLOT_COUNT`、最新为
+ *      `ring[(head-1) % SLOT_COUNT]`。
+ *   3. `Since()` 的区间语义：追平、上界 SLOT_COUNT 槽、gap、新纪元（head 回退）。
+ *   4. 页校验：冷页 / 被格式化 / 外来数据 / 双端契约漂移（TAG、载荷尺寸、帧几何，
+ *      均报 MISMATCH）。
  *   5. region 的写-读一致性：稳定路径、撕裂重试、BUSY。
  *
  * 运行前提 / Setup: 无。页由匿名映射提供，不需要 `/dev/mem`、root 或任何设备，所以
@@ -63,11 +65,12 @@ struct TestProtocolPayload
 static_assert(sizeof(TestProtocolPayload) == 24);
 static_assert(sizeof(TestProtocolPayload) % sizeof(uint32_t) == 0);
 
-using TestPage = SharedPage<Sample, TestProtocolPayload>;
+using TestFormat = LibXRTest::Format;
+using TestPage = SharedPage<TestFormat, Sample, TestProtocolPayload>;
 
-/// 另一份契约：同类型、不同 TAG，用来伪造双端版本漂移。
-/// Another contract: same types, a different TAG, to forge version drift.
-using TaggedPage = SharedPage<Sample, TestProtocolPayload, 0x54414731U>;
+/// 另一份契约：同类型、不同 TAG，用来伪造双端 wire 版本漂移。
+/// Another contract: same types, a different TAG, to forge wire version drift.
+using TaggedPage = SharedPage<TestFormat, Sample, TestProtocolPayload, 0x54414731U>;
 
 /// 再一份契约：payload 尺寸不同。
 /// Yet another contract: a different payload size.
@@ -75,7 +78,12 @@ struct SmallPayload
 {
   uint8_t bytes[16] = {};
 };
-using SmallPage = SharedPage<Sample, SmallPayload>;
+using SmallPage = SharedPage<TestFormat, Sample, SmallPayload>;
+
+/// 又一份契约：帧几何不同（文档稿的 4096B / 64 槽）——页头必须把这种漂移报出来。
+/// Yet another contract: different frame geometry (the doc's 4096B/64 slots) -- the
+/// header must report this drift too.
+using WidePage = SharedPage<DocPageFormat, Sample, TestProtocolPayload>;
 
 /// 读出一个结构体占用的字节，用于伪造外来页。Read a struct's bytes to forge a page.
 template <typename T>
@@ -113,37 +121,46 @@ class Mapping
 /// 1. 双端编译依赖的数字。The numbers both cores compile against.
 void test_layout()
 {
-  // wire frame 跟随注入类型，而不是库里的常量。
-  // The wire frames follow the injected types, not constants inside the library.
-  TEST_ASSERT(sizeof(TelemetryRing<Sample>) == sizeof(Sample) * TELEMETRY_SLOTS + 8);
-  TEST_ASSERT(offsetof(TelemetryRing<Sample>, head) == sizeof(Sample) * TELEMETRY_SLOTS);
-  TEST_ASSERT(offsetof(TelemetryRing<Sample>, write_state) ==
-              sizeof(Sample) * TELEMETRY_SLOTS + 4);
+  // wire frame 跟随注入的 format 与类型，而不是库里的常量。
+  // The wire frames follow the injected format and types, not constants inside the
+  // library.
+  constexpr uint32_t slots = TestFormat::SLOT_COUNT;
+  using Ring = TelemetryRing<Sample, slots>;
+  TEST_ASSERT(TestFormat::PAGE_SIZE == 2048 && TestFormat::SLOT_COUNT == 32);
+  TEST_ASSERT(sizeof(Ring) == sizeof(Sample) * slots + 8);
+  TEST_ASSERT(offsetof(Ring, head) == sizeof(Sample) * slots);
+  TEST_ASSERT(offsetof(Ring, write_state) == sizeof(Sample) * slots + 4);
   TEST_ASSERT(sizeof(Region<TestProtocolPayload>) == 32);
   TEST_ASSERT(offsetof(Region<TestProtocolPayload>, write_state) == 24);
   TEST_ASSERT(offsetof(Region<TestProtocolPayload>, seq) == 28);
 
-  TEST_ASSERT(telemetry_offset() == 16);
-  TEST_ASSERT(region_offset<TestProtocolPayload>() == PAGE_SIZE - 32);
-  TEST_ASSERT(telemetry_offset() + sizeof(TelemetryRing<Sample>) <=
-              region_offset<TestProtocolPayload>());
-  TEST_ASSERT(region_offset<SmallPayload>() == PAGE_SIZE - sizeof(Region<SmallPayload>));
+  TEST_ASSERT(telemetry_offset() == 32);
+  TEST_ASSERT((region_offset<TestFormat, TestProtocolPayload>() == 2048 - 32));
+  TEST_ASSERT((telemetry_offset() + sizeof(Ring) <=
+               region_offset<TestFormat, TestProtocolPayload>()));
+  TEST_ASSERT((region_offset<TestFormat, SmallPayload>() ==
+               TestFormat::PAGE_SIZE - sizeof(Region<SmallPayload>)));
 
-  // 布局描述与页内偏移同源；指纹区分 TAG 与 wire 类型。
-  // The layout descriptor shares its numbers with the in-page offsets; the
-  // fingerprint separates TAGs and wire types.
+  // 布局描述与页头同源：页上记录的几何就是这些数字。
+  // The layout descriptor shares its numbers with the header: the geometry recorded
+  // on the page is exactly these numbers.
   const PageLayout layout = TestPage::Layout();
+  TEST_ASSERT(layout.abi_version == TestFormat::ABI_VERSION);
+  TEST_ASSERT(layout.page_size == TestFormat::PAGE_SIZE);
+  TEST_ASSERT(layout.slot_count == TestFormat::SLOT_COUNT);
   TEST_ASSERT(layout.sample_size == sizeof(Sample));
   TEST_ASSERT(layout.payload_size == sizeof(TestProtocolPayload));
-  TEST_ASSERT(layout.region_offset == region_offset<TestProtocolPayload>());
-  TEST_ASSERT(layout.fingerprint != 0);
-  TEST_ASSERT(TaggedPage::Layout().fingerprint != layout.fingerprint);
-  TEST_ASSERT(SmallPage::Layout().fingerprint != layout.fingerprint);
-  TEST_ASSERT(SmallPage::Layout().region_offset != layout.region_offset);
+  TEST_ASSERT((layout.region_offset ==
+               region_offset<TestFormat, TestProtocolPayload>()));
+  TEST_ASSERT(layout.tag == 0);
+  TEST_ASSERT(TaggedPage::Layout().tag != layout.tag);
+  TEST_ASSERT(SmallPage::Layout().payload_size != layout.payload_size);
+  TEST_ASSERT(WidePage::Layout().page_size != layout.page_size);
+  TEST_ASSERT(WidePage::Layout().slot_count != layout.slot_count);
 
   // 发布索引必须是页内一个可原子访问的 4B 计数。
   // The publish index must be one atomically accessible 4B counter in the page.
-  TEST_ASSERT((std::is_same_v<decltype(std::declval<TelemetryRing<Sample>&>().head),
+  TEST_ASSERT((std::is_same_v<decltype(std::declval<Ring&>().head),
                               std::atomic<uint32_t>>));
   TEST_ASSERT(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t));
   TEST_ASSERT(std::atomic<uint32_t>::is_always_lock_free);
@@ -195,9 +212,15 @@ void test_cold_page_and_index(const Mapping& mapping)
   TEST_ASSERT(!page.Latest(&probe));
 
   const auto* header = reinterpret_cast<const PageHeader*>(mapping.Data());
+  const PageLayout layout = TestPage::Layout();
   TEST_ASSERT(header->magic == PAGE_MAGIC);
-  TEST_ASSERT(header->page_size == PAGE_SIZE);
-  TEST_ASSERT(header->layout == TestPage::Layout().fingerprint);
+  TEST_ASSERT(header->abi_version == layout.abi_version);
+  TEST_ASSERT(header->page_size == layout.page_size);
+  TEST_ASSERT(header->slot_count == layout.slot_count);
+  TEST_ASSERT(header->sample_size == layout.sample_size);
+  TEST_ASSERT(header->payload_size == layout.payload_size);
+  TEST_ASSERT(header->region_offset == layout.region_offset);
+  TEST_ASSERT(header->tag == layout.tag);
 
   page.WriteSample(make_sample(1));
   TEST_ASSERT(page.Latest(&probe));
@@ -214,8 +237,14 @@ void test_cold_page_and_index(const Mapping& mapping)
 ///    silently used.
 void test_foreign_page(const Mapping& mapping)
 {
-  const PageHeader foreign = {
-      .magic = 0x11223344U, .page_size = PAGE_SIZE, .layout = 0, .reserved = 0};
+  const PageHeader foreign = {.magic = 0x11223344U,
+                              .abi_version = 1,
+                              .page_size = static_cast<uint32_t>(TestFormat::PAGE_SIZE),
+                              .slot_count = TestFormat::SLOT_COUNT,
+                              .sample_size = sizeof(Sample),
+                              .payload_size = sizeof(TestProtocolPayload),
+                              .region_offset = 0,
+                              .tag = 0};
   std::memcpy(mapping.Data(), bytes_of(foreign).data(), sizeof(foreign));
 
   TestPage page(mapping.Data());
@@ -225,9 +254,9 @@ void test_foreign_page(const Mapping& mapping)
   TEST_ASSERT(page.Check() == PageMagicKind::FORMATTED);
 }
 
-/// 4. 双端 wire 结构不一致：魔术字对、指纹不对，必须报 MISMATCH 而不是静默错读。
-///    Contract drift between the two ends: right magic, wrong fingerprint, must be
-///    reported as MISMATCH instead of silently misread.
+/// 4. 双端契约漂移：魔术字对、几何/载荷/标签不对，必须报 MISMATCH 而不是静默错读。
+///    Contract drift between the two ends: right magic but wrong geometry, payload or
+///    tag, must be reported as MISMATCH instead of silently misread.
 void test_mismatch_page(const Mapping& mapping)
 {
   TestPage page(mapping.Data());
@@ -241,6 +270,12 @@ void test_mismatch_page(const Mapping& mapping)
 
   const SmallPage resized(mapping.Data());
   TEST_ASSERT(resized.Check() == PageMagicKind::MISMATCH);
+
+  // 帧几何漂移同样必须报出来：页头记录几何，不依赖库常量。
+  // Frame geometry drift must be reported too: the header records the geometry, no
+  // library constants involved.
+  const WidePage regeometried(mapping.Data());
+  TEST_ASSERT(regeometried.Check() == PageMagicKind::MISMATCH);
 
   // 与外来页不同：MISMATCH 页可以被这一侧的 Format() 重新认领。
   // Unlike a foreign page: a mismatched page can be reclaimed by this side's
@@ -265,13 +300,13 @@ void test_latest(const Mapping& mapping)
   TEST_ASSERT(page.Latest(&latest));
   TEST_ASSERT(same_sample(latest, make_sample(2)));
 
-  const auto* ring = reinterpret_cast<const TelemetryRing<Sample>*>(
+  const auto* ring = reinterpret_cast<const TelemetryRing<Sample, TestFormat::SLOT_COUNT>*>(
       mapping.Data() + telemetry_offset());
   TEST_ASSERT(same_sample(ring->ring[2], make_sample(2)));
   TEST_ASSERT(same_sample(ring->ring[0], make_sample(0)));
 
-  auto* writable_ring =
-      reinterpret_cast<TelemetryRing<Sample>*>(mapping.Data() + telemetry_offset());
+  auto* writable_ring = reinterpret_cast<TelemetryRing<Sample, TestFormat::SLOT_COUNT>*>(
+      mapping.Data() + telemetry_offset());
   writable_ring->write_state.store(1, std::memory_order_release);
   TEST_ASSERT(page.TelemetryWriter().Write(make_sample(3)) == 0);
   writable_ring->write_state.store(0, std::memory_order_release);
@@ -286,10 +321,11 @@ void test_since(const Mapping& mapping)
   const auto reader = page.TelemetryReader();
 
   SinceResult result = {};
-  std::array<Sample, TELEMETRY_SLOTS> out = {};
+  std::array<Sample, TestFormat::SLOT_COUNT> out = {};
 
   auto* telemetry_ring =
-      reinterpret_cast<TelemetryRing<Sample>*>(mapping.Data() + telemetry_offset());
+      reinterpret_cast<TelemetryRing<Sample, TestFormat::SLOT_COUNT>*>(
+          mapping.Data() + telemetry_offset());
   telemetry_ring->write_state.store(1, std::memory_order_release);
   TEST_ASSERT(reader.Since(0, out.data(), out.size(), &result) == ErrorCode::BUSY);
   TEST_ASSERT(result.dropped == 0);
@@ -300,7 +336,7 @@ void test_since(const Mapping& mapping)
   TEST_ASSERT(result.dropped == 0);
   TEST_ASSERT(result.next == 0);
 
-  // 写者跑出 100 条，落后 90 槽的读者整段丢：`head - last > 64`。
+  // 写者跑出 100 条，落后 90 槽的读者整段丢：`head - last > 32`。
   // The writer ran 100 ahead; a reader 90 slots behind drops the whole range.
   for (uint32_t index = 0; index < 100; ++index)
   {
@@ -312,53 +348,55 @@ void test_since(const Mapping& mapping)
   TEST_ASSERT(result.dropped == 90);
   TEST_ASSERT(result.next == 100);
 
-  // 正好落后 64 槽仍是可解析区间（上界是 `> 64`）。
-  // Exactly 64 slots behind is still parseable: the bound is `> 64`.
+  // 正好落后 32 槽仍是可解析区间（上界是 `> SLOT_COUNT`）。
+  // Exactly 32 slots behind is still parseable: the bound is `> SLOT_COUNT`.
   page.ClearHistory();
-  for (uint32_t index = 0; index < 64; ++index)
+  for (uint32_t index = 0; index < 32; ++index)
   {
     writer.Write(make_sample(index));
   }
   TEST_ASSERT(reader.Since(0, out.data(), out.size(), &result) == ErrorCode::OK);
-  TEST_ASSERT(result.written == 64);
+  TEST_ASSERT(result.written == 32);
   TEST_ASSERT(result.dropped == 0);
-  TEST_ASSERT(result.next == 64);
-  for (uint32_t index = 0; index < 64; ++index)
+  TEST_ASSERT(result.next == 32);
+  for (uint32_t index = 0; index < 32; ++index)
   {
     TEST_ASSERT(same_sample(out.at(index), make_sample(index)));
   }
 
   // 接着 drain 一小段：区间上界是 head，序列正序。
   // Drain a short range: the upper bound is head and the order is ascending.
-  for (uint32_t index = 64; index < 66; ++index)
+  for (uint32_t index = 32; index < 34; ++index)
   {
     writer.Write(make_sample(index));
   }
-  TEST_ASSERT(reader.Since(64, out.data(), out.size(), &result) == ErrorCode::OK);
+  TEST_ASSERT(reader.Since(32, out.data(), out.size(), &result) == ErrorCode::OK);
   TEST_ASSERT(result.written == 2);
   TEST_ASSERT(result.dropped == 0);
-  TEST_ASSERT(result.next == 66);
-  TEST_ASSERT(same_sample(out.at(0), make_sample(64)));
-  TEST_ASSERT(same_sample(out.at(1), make_sample(65)));
+  TEST_ASSERT(result.next == 34);
+  TEST_ASSERT(same_sample(out.at(0), make_sample(32)));
+  TEST_ASSERT(same_sample(out.at(1), make_sample(33)));
 
-  // 再写一条即可证明回绕：ClearHistory() 后索引从 0 重新计，head 66 落在槽 2。
+  // 再写一条即可证明回绕：ClearHistory() 后索引从 0 重新计，head 34 落在槽 2。
   // One more write proves the wrap: after ClearHistory() the index restarts at 0, so
-  // head 66 lives in slot 2.
-  writer.Write(make_sample(66));
-  TEST_ASSERT(reader.Since(66, out.data(), out.size(), &result) == ErrorCode::OK);
+  // head 34 lives in slot 2.
+  writer.Write(make_sample(34));
+  TEST_ASSERT(reader.Since(34, out.data(), out.size(), &result) == ErrorCode::OK);
   TEST_ASSERT(result.written == 1);
-  TEST_ASSERT(result.next == 67);
-  TEST_ASSERT(same_sample(out.at(0), make_sample(66)));
+  TEST_ASSERT(result.next == 35);
+  TEST_ASSERT(same_sample(out.at(0), make_sample(34)));
   const auto* ring =
-      reinterpret_cast<const TelemetryRing<Sample>*>(mapping.Data() + telemetry_offset());
-  TEST_ASSERT(same_sample(ring->ring[2], make_sample(66)));
+      reinterpret_cast<const TelemetryRing<Sample, TestFormat::SLOT_COUNT>*>(
+          mapping.Data() + telemetry_offset());
+  TEST_ASSERT(same_sample(ring->ring[2], make_sample(34)));
 
   // 空缓冲仍回答区间问题，但没有样本可交付。
   // A null buffer still answers the range question, but delivers no samples.
-  TEST_ASSERT(reader.Since(66, nullptr, TELEMETRY_SLOTS, &result) == ErrorCode::OK);
+  TEST_ASSERT(reader.Since(34, nullptr, TestFormat::SLOT_COUNT, &result) ==
+              ErrorCode::OK);
   TEST_ASSERT(result.written == 0);
   TEST_ASSERT(result.dropped == 1);
-  TEST_ASSERT(result.next == 67);
+  TEST_ASSERT(result.next == 35);
 
   // 容量小于区间时只交付容量内的一段，其余计入 dropped（调用方缓冲不足，不是历史覆写）。
   // 区间按「最新优先」拷贝，被裁掉的是最旧一端：tiny 里是最新的一条。
@@ -366,20 +404,20 @@ void test_since(const Mapping& mapping)
   // dropped (caller capacity, not a history overwrite). The range is copied newest
   // first, so clamping drops the oldest end and tiny keeps the newest sample.
   std::array<Sample, 1> tiny = {};
-  writer.Write(make_sample(67));
-  writer.Write(make_sample(68));
-  TEST_ASSERT(reader.Since(67, tiny.data(), tiny.size(), &result) == ErrorCode::OK);
+  writer.Write(make_sample(35));
+  writer.Write(make_sample(36));
+  TEST_ASSERT(reader.Since(35, tiny.data(), tiny.size(), &result) == ErrorCode::OK);
   TEST_ASSERT(result.written == 1);
   TEST_ASSERT(result.dropped == 1);
-  TEST_ASSERT(result.next == 69);
-  TEST_ASSERT(same_sample(tiny.at(0), make_sample(68)));
+  TEST_ASSERT(result.next == 37);
+  TEST_ASSERT(same_sample(tiny.at(0), make_sample(36)));
 
   // 上一纪元留下的 last_seen（大于 head）是 gap，不是回绕出来的区间。
   // A last_seen from a previous epoch (larger than head) is a gap, not a wrapped range.
   TEST_ASSERT(reader.Since(1000, out.data(), out.size(), &result) == ErrorCode::EMPTY);
   TEST_ASSERT(result.written == 0);
   TEST_ASSERT(result.dropped > 0);
-  TEST_ASSERT(result.next == 69);
+  TEST_ASSERT(result.next == 37);
 }
 
 /// 7. region 的稳定读、失败重试的上限与 BUSY 判定。
@@ -421,7 +459,7 @@ void test_region(const Mapping& mapping)
   TEST_ASSERT(snapshot.param_id == 0);
 
   auto* region = reinterpret_cast<Region<TestProtocolPayload>*>(
-      mapping.Data() + region_offset<TestProtocolPayload>());
+      mapping.Data() + region_offset<TestFormat, TestProtocolPayload>());
   TEST_ASSERT(reference.Raw() == region);
 
   // 伪造一次撕裂写的第一轮：写者已把索引提到 3，读者 `before` 读到 3、拷贝到新
@@ -461,7 +499,7 @@ int main()
   test_unbound_page();
 
   {
-    const Mapping mapping(PAGE_SIZE);
+    const Mapping mapping(TestFormat::PAGE_SIZE);
     test_cold_page_and_index(mapping);
     test_foreign_page(mapping);
     test_mismatch_page(mapping);

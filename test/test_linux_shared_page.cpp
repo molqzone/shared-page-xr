@@ -60,9 +60,10 @@ struct ProtocolPayload
 
 static_assert(sizeof(ProtocolPayload) == 24);
 
-using TestPage = SharedPage<Sample, ProtocolPayload>;
-using TestBatch = TelemetryBatch<Sample>;
-using TestAdapter = LinuxSharedPage<Sample, ProtocolPayload>;
+using TestFormat = LibXRTest::Format;
+using TestPage = SharedPage<TestFormat, Sample, ProtocolPayload>;
+using TestBatch = TelemetryBatch<Sample, TestFormat::SLOT_COUNT>;
+using TestAdapter = LinuxSharedPage<TestFormat, Sample, ProtocolPayload>;
 
 /// 收集遥测 topic 上的每一组。Captures every batch published on the telemetry topic.
 struct BatchCapture
@@ -118,7 +119,7 @@ int main()
   static_assert(std::is_base_of_v<LibXR::Topic, TestPage>);
   static_assert(std::is_base_of_v<LibXR::Topic, TestAdapter>);
 
-  const Mapping mapping(PAGE_SIZE);
+  const Mapping mapping(TestFormat::PAGE_SIZE);
   TestPage page(mapping.Data());
   page.Format();
   TEST_ASSERT(page.Ready());
@@ -221,7 +222,8 @@ int main()
   TEST_ASSERT(same_sample(capture.last.ring[1], make_sample(81)));
 
   auto* telemetry_ring =
-      reinterpret_cast<TelemetryRing<Sample>*>(mapping.Data() + telemetry_offset());
+      reinterpret_cast<TelemetryRing<Sample, TestFormat::SLOT_COUNT>*>(
+          mapping.Data() + telemetry_offset());
   telemetry_ring->write_state.store(1, std::memory_order_release);
   TestBatch busy_batch = {};
   TEST_ASSERT(epoch_adapter.Drain(&busy_batch) == 0);

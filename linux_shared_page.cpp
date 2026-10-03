@@ -16,10 +16,10 @@ namespace LibXR
 {
 namespace detail
 {
-LinuxMapping LinuxMapping::Open(uint64_t physical_address)
+LinuxMapping LinuxMapping::Open(uint64_t physical_address, size_t page_bytes)
 {
   LinuxMapping mapping;
-  if (physical_address == 0)
+  if (physical_address == 0 || page_bytes == 0)
   {
     return mapping;
   }
@@ -33,7 +33,7 @@ LinuxMapping LinuxMapping::Open(uint64_t physical_address)
   const uint64_t page_size = static_cast<uint64_t>(system_page_size);
   const uint64_t page_base = physical_address & ~(page_size - 1U);
   const size_t page_offset = static_cast<size_t>(physical_address - page_base);
-  const size_t map_size = ((page_offset + PAGE_SIZE + page_size - 1U) / page_size) *
+  const size_t map_size = ((page_offset + page_bytes + page_size - 1U) / page_size) *
                           static_cast<size_t>(page_size);
 
   mapping.fd = ::open("/dev/mem", O_RDWR | O_SYNC);

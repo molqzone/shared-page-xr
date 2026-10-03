@@ -23,10 +23,10 @@ inline constexpr uint32_t DEFAULT_DRAIN_PERIOD_US = 1000;
 /**
  * @brief A batch drained from the telemetry ring.
  */
-template <PagePod T>
+template <PagePod T, uint32_t SLOTS>
 struct TelemetryBatch
 {
-  T ring[TELEMETRY_SLOTS] = {};
+  T ring[SLOTS] = {};
   uint32_t count = 0;
   uint32_t head = 0;
   uint8_t gap = 0;
@@ -39,7 +39,7 @@ namespace detail
 class LinuxMapping
 {
  public:
-  static LinuxMapping Open(uint64_t physical_address);
+  static LinuxMapping Open(uint64_t physical_address, size_t page_bytes);
 
   LinuxMapping() = default;
   LinuxMapping(const LinuxMapping&) = delete;
@@ -61,38 +61,39 @@ class LinuxMapping
 /**
  * @brief Linux view of a shared page and its telemetry topic.
  */
-template <PagePod T, PagePod P, uint32_t TAG = 0>
-class LinuxSharedPage : public SharedPage<T, P, TAG>
+template <typename F, PagePod T, PagePod P, uint32_t TAG = 0>
+class LinuxSharedPage : public SharedPage<F, T, P, TAG>
 {
  public:
+  /// @brief The topic payload for this contract: one drained batch.
+  using Batch = TelemetryBatch<T, F::SLOT_COUNT>;
+
   LinuxSharedPage(uint64_t physical_address, Topic topic,
                   uint32_t drain_period_us = DEFAULT_DRAIN_PERIOD_US)
-      : LinuxSharedPage(detail::LinuxMapping::Open(physical_address), topic,
-                        drain_period_us)
+      : LinuxSharedPage(detail::LinuxMapping::Open(physical_address, F::PAGE_SIZE),
+                        topic, drain_period_us)
   {
   }
 
   LinuxSharedPage(uint64_t physical_address,
                   const char* topic_name = TELEMETRY_TOPIC_NAME,
                   uint32_t drain_period_us = DEFAULT_DRAIN_PERIOD_US)
-      : LinuxSharedPage(physical_address,
-                        Topic::CreateTopic<TelemetryBatch<T>>(topic_name),
+      : LinuxSharedPage(physical_address, Topic::CreateTopic<Batch>(topic_name),
                         drain_period_us)
   {
   }
 
-  LinuxSharedPage(const SharedPage<T, P, TAG>& page, Topic topic,
+  LinuxSharedPage(const SharedPage<F, T, P, TAG>& page, Topic topic,
                   uint32_t drain_period_us = DEFAULT_DRAIN_PERIOD_US)
-      : SharedPage<T, P, TAG>(page.Data(), topic), period_us_(drain_period_us)
+      : SharedPage<F, T, P, TAG>(page.Data(), topic), period_us_(drain_period_us)
   {
     ASSERT(drain_period_us != 0);
   }
 
-  LinuxSharedPage(const SharedPage<T, P, TAG>& page,
+  LinuxSharedPage(const SharedPage<F, T, P, TAG>& page,
                   const char* topic_name = TELEMETRY_TOPIC_NAME,
                   uint32_t drain_period_us = DEFAULT_DRAIN_PERIOD_US)
-      : LinuxSharedPage(page, Topic::CreateTopic<TelemetryBatch<T>>(topic_name),
-                        drain_period_us)
+      : LinuxSharedPage(page, Topic::CreateTopic<Batch>(topic_name), drain_period_us)
   {
   }
 
@@ -106,7 +107,7 @@ class LinuxSharedPage : public SharedPage<T, P, TAG>
    */
   bool Poll(uint64_t now_us = UINT64_MAX)
   {
-    static_assert(offsetof(TelemetryBatch<T>, count) == sizeof(T) * TELEMETRY_SLOTS,
+    static_assert(offsetof(Batch, count) == sizeof(T) * F::SLOT_COUNT,
                   "the batch counter must follow the ring without padding");
 
     if (now_us == UINT64_MAX)
@@ -124,7 +125,7 @@ class LinuxSharedPage : public SharedPage<T, P, TAG>
     }
     last_drain_us_ = now_us;
 
-    TelemetryBatch<T> batch = {};
+    Batch batch = {};
     if (Drain(&batch) == 0 && batch.gap == 0)
     {
       return false;
@@ -137,7 +138,7 @@ class LinuxSharedPage : public SharedPage<T, P, TAG>
   /**
    * @brief Drain the next telemetry batch without publishing it.
    */
-  uint32_t Drain(TelemetryBatch<T>* batch)
+  uint32_t Drain(Batch* batch)
   {
     if (batch == nullptr)
     {
@@ -152,7 +153,7 @@ class LinuxSharedPage : public SharedPage<T, P, TAG>
 
     SinceResult result = {};
     const ErrorCode status = this->TelemetryReader().Since(
-        last_seen_, batch->ring, TELEMETRY_SLOTS, &result);
+        last_seen_, batch->ring, F::SLOT_COUNT, &result);
     if (status == ErrorCode::BUSY)
     {
       return 0;
@@ -173,7 +174,7 @@ class LinuxSharedPage : public SharedPage<T, P, TAG>
 
  private:
   LinuxSharedPage(detail::LinuxMapping mapping, Topic topic, uint32_t drain_period_us)
-      : SharedPage<T, P, TAG>(mapping.Data(), topic),
+      : SharedPage<F, T, P, TAG>(mapping.Data(), topic),
         mapping_(std::move(mapping)),
         period_us_(drain_period_us)
   {

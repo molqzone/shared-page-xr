@@ -82,7 +82,7 @@ static_assert(sizeof(PageHeader) == 32, "PageHeader layout pinned");
 static_assert(offsetof(PageHeader, tag) == 28, "PageHeader layout pinned");
 
 /// @brief In-page telemetry offset (header plus alignment padding).
-inline constexpr size_t TelemetryOffset() { return sizeof(PageHeader); }
+inline constexpr size_t telemetry_offset() { return sizeof(PageHeader); }
 
 /** @brief Result of validating a mapped page.
  *
@@ -169,7 +169,7 @@ struct PageLayout
 
 /** @brief Compute and validate the layout of `SharedPage<F, T, P, TAG>`. */
 template <typename F, PagePod T, PagePod P, uint32_t TAG = 0>
-constexpr PageLayout MakePageLayout()
+constexpr PageLayout make_page_layout()
 {
   using Ring = TelemetryRing<T, F::SLOT_COUNT>;
 
@@ -184,7 +184,7 @@ constexpr PageLayout MakePageLayout()
   static_assert(sizeof(P) % sizeof(uint32_t) == 0,
                 "the payload type must be a multiple of 4 bytes: region copies are "
                 "word-atomic");
-  static_assert(TelemetryOffset() % sizeof(uint32_t) == 0 &&
+  static_assert(telemetry_offset() % sizeof(uint32_t) == 0 &&
                     (sizeof(T) * F::SLOT_COUNT) % sizeof(uint32_t) == 0,
                 "every ring slot must start 4-byte aligned inside the page");
   static_assert(region_offset<F, P>() % sizeof(uint32_t) == 0,
@@ -199,7 +199,7 @@ constexpr PageLayout MakePageLayout()
                 "write_state must follow the payload without padding");
   static_assert(offsetof(Region<P>, seq) == sizeof(P) + sizeof(uint32_t),
                 "seq must follow write_state");
-  static_assert(TelemetryOffset() + sizeof(Ring) <= region_offset<F, P>(),
+  static_assert(telemetry_offset() + sizeof(Ring) <= region_offset<F, P>(),
                 "the telemetry ring and the region must not overlap");
 
   return PageLayout{F::ABI_VERSION,
@@ -394,7 +394,7 @@ class SharedPage : public Topic
 {
  public:
   /// @brief The contract instantiation's layout, shared by both cores.
-  static constexpr PageLayout Layout() { return MakePageLayout<F, T, P, TAG>(); }
+  static constexpr PageLayout Layout() { return make_page_layout<F, T, P, TAG>(); }
 
   SharedPage() = default;
 

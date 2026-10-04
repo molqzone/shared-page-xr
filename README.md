@@ -62,7 +62,7 @@ using Page = LibXR::SharedPage<Format, Sample, Command, WIRE_TAG>;
 * 类型约束（`PagePod`）：trivially copyable + standard layout；总长是 4 的倍数
   （逐字原子拷贝）。字段偏移与语义是**应用的契约**，用应用侧 `static_assert` 钉住。
 * 布局检查在**编译期**：环与区不重叠、计数器紧贴无填充、区落在页尾、槽位 4B 对齐，
-  全部由 `MakePageLayout<F, T, P, TAG>()` 断言。
+  全部由 `make_page_layout<F, T, P, TAG>()` 断言。
 * 双端互验在**初始化期**：页头记录 abi_version/页长/槽位/双端载荷尺寸/区偏移/TAG，
   `Check()` 逐项比对。字段语义变了而尺寸没变时，递增 `TAG`；帧几何变了换 `Format`。
 * `TAG` 是产品侧的 wire 版本号；不传默认 0。

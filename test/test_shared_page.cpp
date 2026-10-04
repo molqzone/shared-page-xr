@@ -136,9 +136,9 @@ void test_layout()
   TEST_ASSERT(offsetof(Region<TestProtocolPayload>, write_state) == 24);
   TEST_ASSERT(offsetof(Region<TestProtocolPayload>, seq) == 28);
 
-  TEST_ASSERT(TelemetryOffset() == 32);
+  TEST_ASSERT(telemetry_offset() == 32);
   TEST_ASSERT((region_offset<TestFormat, TestProtocolPayload>() == 2048 - 32));
-  TEST_ASSERT((TelemetryOffset() + sizeof(Ring) <=
+  TEST_ASSERT((telemetry_offset() + sizeof(Ring) <=
                region_offset<TestFormat, TestProtocolPayload>()));
   TEST_ASSERT((region_offset<TestFormat, SmallPayload>() ==
                TestFormat::PAGE_SIZE - sizeof(Region<SmallPayload>)));
@@ -303,12 +303,12 @@ void test_latest(const Mapping& mapping)
   TEST_ASSERT(same_sample(latest, make_sample(2)));
 
   const auto* ring = reinterpret_cast<const TelemetryRing<Sample, TestFormat::SLOT_COUNT>*>(
-      mapping.Data() + TelemetryOffset());
+      mapping.Data() + telemetry_offset());
   TEST_ASSERT(same_sample(ring->ring[2], make_sample(2)));
   TEST_ASSERT(same_sample(ring->ring[0], make_sample(0)));
 
   auto* writable_ring = reinterpret_cast<TelemetryRing<Sample, TestFormat::SLOT_COUNT>*>(
-      mapping.Data() + TelemetryOffset());
+      mapping.Data() + telemetry_offset());
   writable_ring->write_state.store(1, std::memory_order_release);
   TEST_ASSERT(page.TelemetryWriter().Write(make_sample(3)) == 0);
   writable_ring->write_state.store(0, std::memory_order_release);
@@ -327,7 +327,7 @@ void test_since(const Mapping& mapping)
 
   auto* telemetry_ring =
       reinterpret_cast<TelemetryRing<Sample, TestFormat::SLOT_COUNT>*>(
-          mapping.Data() + TelemetryOffset());
+          mapping.Data() + telemetry_offset());
   telemetry_ring->write_state.store(1, std::memory_order_release);
   TEST_ASSERT(reader.Since(0, out.data(), out.size(), &result) == ErrorCode::BUSY);
   TEST_ASSERT(result.dropped == 0);
@@ -389,7 +389,7 @@ void test_since(const Mapping& mapping)
   TEST_ASSERT(same_sample(out.at(0), make_sample(34)));
   const auto* ring =
       reinterpret_cast<const TelemetryRing<Sample, TestFormat::SLOT_COUNT>*>(
-          mapping.Data() + TelemetryOffset());
+          mapping.Data() + telemetry_offset());
   TEST_ASSERT(same_sample(ring->ring[2], make_sample(34)));
 
   // 空缓冲仍回答区间问题，但没有样本可交付。
@@ -506,7 +506,7 @@ void test_stale_claims(const Mapping& mapping)
 
   auto* telemetry_ring =
       reinterpret_cast<TelemetryRing<Sample, TestFormat::SLOT_COUNT>*>(
-          mapping.Data() + TelemetryOffset());
+          mapping.Data() + telemetry_offset());
   auto* region = reinterpret_cast<Region<TestProtocolPayload>*>(
       mapping.Data() + region_offset<TestFormat, TestProtocolPayload>());
 

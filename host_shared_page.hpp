@@ -121,8 +121,8 @@ class SharedPageHost : public SharedPage<F, T, P, TAG>
   {
   }
 
-  ~SharedPageHost() = default;
-
+  // No destructor: the adapter borrows the page address and the event source
+  // and owns nothing (global-lifetime convention).
   SharedPageHost(const SharedPageHost&) = delete;
   SharedPageHost& operator=(const SharedPageHost&) = delete;
 

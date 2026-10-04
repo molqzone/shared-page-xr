@@ -32,7 +32,19 @@
 namespace LibXR
 {
 
-/** @brief RAII `/dev/mem` mapping of one shared page. Linux only. */
+/** @brief `/dev/mem` mapping of one shared page. Linux only.
+ *
+ * 全局生命周期约定（与 LibXR 的分配一次、永不释放一致）：映射在进程生命周期内
+ * 有效，不 munmap、不关 fd，析构时什么也不做——所以这个类干脆没有析构函数。
+ * 对象本身是可拷贝的只读视图（与库内其它视图同风格），拷贝即同一映射的另一个
+ * 视图；`Data() == nullptr` 表示映射失败。
+ * Global-lifetime convention (matching the LibXR allocate-once, never-release
+ * rule): the mapping lives for the process lifetime -- no munmap, no close,
+ * nothing at destruction time, so this class simply has no destructor. The
+ * object is a copyable read-only view (same style as the library's other
+ * views); copying yields another view of the same mapping. `Data() == nullptr`
+ * marks a failed mapping.
+ */
 class LinuxMapping
 {
  public:
@@ -68,8 +80,10 @@ class LinuxMapping
                           static_cast<off_t>(page_base));
     if (mapping.base == MAP_FAILED)
     {
+      // Leave data null: the caller's validity check rejects the object. The
+      // fd and any partial state stay as they are under the global-lifetime
+      // convention; this is a one-time bind failure path.
       mapping.base = nullptr;
-      mapping.Reset();
       return mapping;
     }
 
@@ -79,54 +93,8 @@ class LinuxMapping
   }
 
   LinuxMapping() = default;
-  LinuxMapping(const LinuxMapping&) = delete;
-  LinuxMapping& operator=(const LinuxMapping&) = delete;
-
-  LinuxMapping(LinuxMapping&& other) noexcept
-      : base(other.base), data(other.data), length(other.length), fd(other.fd)
-  {
-    other.base = nullptr;
-    other.data = nullptr;
-    other.length = 0;
-    other.fd = -1;
-  }
-
-  LinuxMapping& operator=(LinuxMapping&& other) noexcept
-  {
-    if (this != &other)
-    {
-      Reset();
-      base = other.base;
-      data = other.data;
-      length = other.length;
-      fd = other.fd;
-      other.base = nullptr;
-      other.data = nullptr;
-      other.length = 0;
-      other.fd = -1;
-    }
-    return *this;
-  }
-
-  ~LinuxMapping() { Reset(); }
 
   [[nodiscard]] uint8_t* Data() const { return data; }
-
-  void Reset()
-  {
-    if (base != nullptr)
-    {
-      ::munmap(base, length);
-    }
-    if (fd >= 0)
-    {
-      ::close(fd);
-    }
-    base = nullptr;
-    data = nullptr;
-    length = 0;
-    fd = -1;
-  }
 
  private:
   void* base = nullptr;

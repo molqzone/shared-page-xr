@@ -96,7 +96,9 @@ std::array<uint8_t, sizeof(T)> bytes_of(const T& value)
   return bytes;
 }
 
-/// 一块 RAII 匿名映射页。An RAII anonymous page mapping.
+/// 一块匿名映射页（全局生命周期：测试进程持有到退出，不 munmap）。
+/// An anonymous page mapping (global lifetime: held until the test process
+/// exits; no munmap, no destructor).
 class Mapping
 {
  public:
@@ -107,8 +109,6 @@ class Mapping
   {
     TEST_ASSERT(data_ != MAP_FAILED);
   }
-
-  ~Mapping() { ::munmap(data_, bytes_); }
 
   Mapping(const Mapping&) = delete;
   Mapping& operator=(const Mapping&) = delete;

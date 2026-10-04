@@ -1,7 +1,7 @@
 # shared-page-xr
 
 SG2002 大小核（Linux 大核 ↔ C906L RTOS 小核）共享页传输。`SharedPage` 继承 LibXR 的
-`Topic`，模块直接以 Topic 作为边界；Linux 侧扩展负责 drain。
+`Topic`，模块直接以 Topic 作为边界；宿主侧适配器负责 drain。
 
 本仓库是 `bsp-guidance-vision` / action 仓库的 submodule（两仓同 URL 同 pin，对齐
 `libcvimpp` 的做法），**不是 xrobot Module**：没有 MANIFEST、不进 `User/xrobot.yaml`、
@@ -13,19 +13,27 @@ SG2002 大小核（Linux 大核 ↔ C906L RTOS 小核）共享页传输。`Share
 
 ```text
 shared_page.hpp / .cpp        页协议 + typed 视图：SharedPage<F, T, P, TAG> : Topic、
-                              Telemetry<T>、Reference<P>。C906L 控制环直接用
-linux_shared_page.hpp / .cpp  LinuxSharedPage<F, T, P, TAG> : SharedPage：/dev/mem 映射 +
-                              门铃事件 → drain → Topic；Doorbell 事件源
-CMakeLists.txt                STATIC target shared_page_xr，链接 libxr；Linux 侧只在 Linux
-                              构建中编译
+                               Telemetry<T>、Reference<P>。平台中立，两端同用
+host_shared_page.hpp          平台中立宿主适配器（header-only）：SharedPageHost<F, T, P, TAG>，
+                               页指针 + LibXR Semaphore 事件源注入 → drain → Topic
+linux_mapping.hpp             Linux 参考绑定：/dev/mem RAII 映射。只有 Linux 消费者显式
+                               include 才进入编译，中立核心不引用它
+CMakeLists.txt                STATIC target shared_page_xr，只编 shared_page.cpp，链接 libxr；
+                               适配器 header-only 且不触平台 UAPI，任何平台可编译
 ```
 
 声明与实现分开：`.hpp` 保留契约与类声明，协议逻辑在 `.cpp` 的类型擦除引擎里（`detail::`），
 typed 层只是带 `static_assert` 的薄转发；wire 类型变多也不会复制协议实现。
 
-**数据路径只有一条：门铃事件**。构造即绑定事件源（取不到即拒绝构造），消费入口只有
-`WaitAndPublish()`——等门铃、drain、发布。刻意不提供轮询路径：轮询一旦存在就会因为
+**数据路径只有一条：事件信号量**。构造即绑定事件源（空指针即拒绝构造），消费入口只有
+`WaitAndPublish()`——等信号量、drain、发布。刻意不提供轮询路径：轮询一旦存在就会因为
 "方便"变成实际使用的那条。周期代码只许看状态（`LastSeen()` 时鲜检查），不许过手数据。
+
+事件源是 LibXR `Semaphore`（每个 LibXR 平台都有实现：Linux futex、FreeRTOS 队列、
+bare-metal 自旋）：等待侧本适配器只调 `Wait(timeout_ms)`；通知侧由平台绑定持有同一个
+`Semaphore&`，线程里 `Post()`、ISR 里 `PostFromCallback(in_isr)`。本库不接触任何平台
+UAPI——页指针与信号量都是注入的：Linux 侧的 `/dev/mem` 参考绑定在 `linux_mapping.hpp`，
+由消费者自行 include；其他平台给链接脚本符号或静态缓冲即可。
 
 ## 帧格式是平台数据，载荷是应用数据，语义归本库
 
@@ -68,14 +76,15 @@ page.WriteSample(sample);                        // 写 ring + 推 head
 Command command = {};
 if (page.Region().Read(&command, &seq) == ErrorCode::OK) { /* 用 command */ }
 
-// Linux 侧 producer / recorder：LinuxSharedPage owns the /dev/mem mapping，
-// 门铃是唯一触发（平台绑定把 cvi-rtos-cmdqu 适配成 Doorbell 同形态）
-LibXR::Doorbell doorbell = /* 平台绑定的事件源 */;
-LibXR::LinuxSharedPage<Format, Sample, Command> page(std::move(doorbell),
-                                                     /* shared-page physical address */,
-                                                     "telemetry");
-LibXR::Topic& telemetry = page;                  // module boundary
-for (;;) { page.WaitAndPublish(Doorbell::WAIT_FOREVER); }  // 事件驱动，无轮询
+// 另一侧（Linux host / RTOS host）：页指针与事件源都是注入的，适配器平台中立
+LibXR::Semaphore event(0);                       // 唯一事件源；绑定侧 Post 它
+auto* page_addr = /* 平台映射的页指针；Linux 参考绑定见 linux_mapping.hpp */;
+LibXR::SharedPageHost<Format, Sample, Command> host(page_addr, &event, "telemetry");
+LibXR::Topic& telemetry = host;                  // module boundary
+for (;;) { host.WaitAndPublish(LibXR::WAIT_FOREVER); }  // 事件驱动，无轮询
+// 平台绑定（如 cvi-rtos-cmdqu 转发线程 / MCU mailbox ISR）：data 到达即
+// event.Post();  // 线程上下文
+// event.PostFromCallback(true);  // ISR 上下文
 ```
 
 ## 页布局（页长/槽位随 format，两侧均非缓存映射）
@@ -102,7 +111,7 @@ acquire/release；padding 中的写入状态覆盖 payload 的同步窗口。读
 **写者死亡**：写者死在 claim 窗口里（进程被杀/固件崩溃）会让 `write_state` 永久
 占用，读者从此只拿 `BUSY`。机制是 `SharedPage::RecoverStaleClaims()`（只破 claim，
 不动 `head`/`seq`/数据——未发布完的槽位在 `head` 之外，不丢历史、不漏撕裂数据）；
-策略由带时钟的一侧执行：Linux 适配器的 `Drain()` 在持续 `BUSY` 超过
+策略由带时钟的一侧执行：宿主适配器的 `Drain()` 在持续 `BUSY` 超过
 `STALE_CLAIM_TIMEOUT_US`（10ms，远大于正常 claim 窗口）后自动破除并重同步，固件侧
 消费者从自己的健康检查调同一机制。
 
@@ -111,30 +120,34 @@ acquire/release；padding 中的写入状态覆盖 payload 的同步窗口。读
 * **契约无独立版本号字段**：页头自描述 + 产品 `TAG` 承担互验，变更双端同步。加字段永远
   是廉价操作，改已有字段偏移不是——改了就必须递增 `TAG` 并同步另一侧；改帧几何就换
   `Format` traits。
-* 页地址不进模块构造参数：Linux 侧经 yaml 配置注入，C906L 侧由链接脚本分配（平台
-  内存图数据，见 sophgo-sg200x-debian 的 `CVIMMAP_RTOS_SHM_ADDR`）。
-* `SharedPage` 继承 LibXR `Topic`；`LinuxSharedPage` 映射 Linux 物理页并发布 typed topic。
-  两者都需要编译本仓库的 `.cpp`。
+* 页地址以指针注入，不进契约：Linux 侧由平台映射后传入（参考绑定
+  `linux_mapping.hpp` 读 `/dev/mem`，物理地址经 yaml 配置注入），C906L 侧由链接
+  脚本分配的符号传入（平台内存图数据，见 sophgo-sg200x-debian 的
+  `CVIMMAP_RTOS_SHM_ADDR`）。
+* `SharedPage` 继承 LibXR `Topic`；`SharedPageHost` 等注入的事件源、drain 并发布
+  typed topic。页契约语义平台中立；宿主适配器 header-only 且不触平台 UAPI，只有页
+  契约需要编译本仓库的 `.cpp`。
 
 ## 测试
 
 测试放在**本仓库**的 `test/` 下：与被测头同仓（本契约有两个消费者，测试不能只属于其中
-一个），检查用 `TEST_ASSERT`（始终生效，不看产品断言开关）。页由匿名映射提供，不需要
-`/dev/mem`、root 或第二个进程，所以契约在主机上就能验证。
+一个），检查用 `TEST_ASSERT`（始终生效，不看产品断言开关）。页是进程内静态缓冲、事件源
+是 LibXR `Semaphore`，不需要 `/dev/mem`、root、eventfd 或第二个进程，所以契约加适配器
+在主机上就能验证。
 
 ```text
 test/CMakeLists.txt                测试目标与 CTest 登记
 test/test_assert.hpp               始终生效的 TEST_ASSERT（与 libxr 同名同义）
 test/sample.hpp                    测试自有的 wire 类型、构造与比较
 test/test_shared_page.cpp          页契约与发布索引
-test/test_linux_shared_page.cpp    适配器 + 真实 LibXR Topic
+test/test_host_shared_page.cpp     适配器 + 真实 LibXR Topic
 ```
 
 测试用的 `Sample` 是 32B 的测试类型、`Format` 是 2048B 页 / 32 槽的测试几何，均不对应
 任何产品定义：它们与产品不同，布局检查就证明了帧几何与载荷都跟着注入的 traits 与类型
 走，而不是被库写死。
 
-**平铺而不是一个接口一层目录**：本仓库只有两个头、两个测试文件，`libxr/test/automatic`
+**平铺而不是一个接口一层目录**：本仓库的头与测试文件都还少，`libxr/test/automatic`
 那种镜像源码树的层级在这里只是额外跳转。等同一接口长到多个测试文件再拆，那时目录名取
 被测源文件名（比如 `test/shared_page/`）。
 
@@ -151,13 +164,13 @@ ctest --test-dir build --output-on-failure
 
 ```bash
 cmake --preset debug && cmake --build --preset debug
-ctest --test-dir build-host -R "shared_page|linux_shared_page" --output-on-failure
+ctest --test-dir build-host -R "shared_page|host_shared_page" --output-on-failure
 ```
 
 `test_shared_page.cpp`：布局与发布索引——帧几何跟随注入 format、`TelemetryRing`/`Region`
 跟随注入类型的偏移与总长、页头自描述互验与 `MISMATCH`（TAG/载荷尺寸/帧几何漂移）、
 `Latest`/`Since` 的边界（SLOT_COUNT 槽余量、gap、新纪元）、region 稳定读与撕裂重试。
-`test_linux_shared_page.cpp`：事件门（无门铃不发布、空铃/超时/冷页不发布、多次通知
+`test_host_shared_page.cpp`：事件门（无事件不发布、空信号/超时/冷页不发布、多次通知
 coalesce 成一次 drain）、一组遥测进真实 LibXR topic 的回调订阅者、gap 后重新同步、
 以及由高层 payload 写入的参考区回读。
 

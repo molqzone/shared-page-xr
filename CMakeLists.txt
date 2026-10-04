@@ -15,18 +15,19 @@ endif()
 #
 # STATIC target（与 libxr 的默认一致）：实现放在 .cpp 里，头文件保留契约与声明。
 # STATIC target, matching the LibXR default: implementations live in the .cpp files and
-# the headers hold only the contract and the declarations. The page contract itself is
-# platform neutral (`shared_page.hpp`, used directly by C906L); the Linux-side drain is
-# compiled only for Linux and is exposed by `linux_shared_page.hpp`.
+# the headers hold only the contract and the declarations.
+#
+# 宿主适配器 `host_shared_page.hpp` 是 header-only 的平台中立件：页指针与事件源
+# （LibXR `Semaphore`，每个 LibXR 平台都有实现）全部由调用方注入，不接触任何平台
+# UAPI，因此不再按 `LIBXR_SYSTEM` 分支。Linux 的 `/dev/mem` 参考绑定在同目录
+# `linux_mapping.hpp`，只有 Linux 消费者显式 include 时才进入编译。
+# The host adapter `host_shared_page.hpp` is a header-only platform-neutral piece:
+# the page pointer and the event source (a LibXR `Semaphore`, implemented on every
+# LibXR platform) are both injected by the caller, no platform UAPI is touched, so
+# no per-system branching is needed. The Linux /dev/mem reference binding sits in
+# `linux_mapping.hpp` and enters compilation only where a Linux consumer includes it.
 if(NOT TARGET shared_page_xr)
-  set(_shared_page_sources shared_page.cpp)
-  # The page contract is platform neutral. The telemetry drain owns /dev/mem
-  # and LibXR Topic integration, so it belongs only in Linux builds and must
-  # not enter the C906 firmware archive.
-  if(NOT LIBXR_SYSTEM STREQUAL "freertos")
-    list(APPEND _shared_page_sources linux_shared_page.cpp)
-  endif()
-  add_library(shared_page_xr STATIC ${_shared_page_sources})
+  add_library(shared_page_xr STATIC shared_page.cpp)
   target_include_directories(shared_page_xr PUBLIC ${CMAKE_CURRENT_LIST_DIR})
   target_compile_features(shared_page_xr PUBLIC cxx_std_20)
   target_link_libraries(shared_page_xr PUBLIC xr)

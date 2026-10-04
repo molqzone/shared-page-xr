@@ -212,7 +212,7 @@ int main()
   // While the writer is active the range is not delivered and last_seen holds.
   auto* telemetry_ring =
       reinterpret_cast<TelemetryRing<Sample, TestFormat::SLOT_COUNT>*>(g_page_storage +
-                                                                      telemetry_offset());
+                                                                      TelemetryOffset());
   telemetry_ring->write_state.store(1, std::memory_order_release);
   TestBatch busy_batch = {};
   TEST_ASSERT(epoch_adapter.Drain(&busy_batch) == 0);

@@ -42,7 +42,7 @@ UAPI——页指针与信号量都是注入的：Linux 侧的 `/dev/mem` 参考�
 * **帧/几何**（页多大、多少槽、什么偏移）是**平台数据**：由平台内存图与 ABI 定
   （例如 sophgo-sg200x-debian 的 `sg2002-ipc`：`CVIMMAP_RTOS_SHM_ADDR` 划区域，
   `sg2002_rtos_shm_layout_line` 自描述页头）。编译期以 format traits 注入
-  （`LibXR::DocPageFormat` 只是 `inter-core-protocol.md` 定稿那4KiB/64 槽格式，不是
+  （`LibXR::Sg2002PageFormat` 只是 `inter-core-protocol.md` 定稿那4KiB/64 槽格式，不是
   默认真理）；初始化期由**自描述页头逐项互验**——页头把每个几何数字写在页上，
   照 `sg2002-ipc` `layout_line` 的做法，`Check()` 逐项比对，任何漂移报 `MISMATCH`，
   绝不静默错读。
@@ -52,7 +52,7 @@ UAPI——页指针与信号量都是注入的：Linux 侧的 `/dev/mem` 参考�
 
 ```cpp
 // 产品自己的契约头，双端 include 同一份
-using Format = LibXR::DocPageFormat;      // 平台几何；平台换几何时换 traits
+using Format = LibXR::Sg2002PageFormat;      // 平台几何；平台换几何时换 traits
 struct Sample { uint64_t ticks; ... };    // 遥测采样，产品自定字段
 struct Command { ... };                   // 参考区 payload，产品自定字段
 
@@ -62,7 +62,7 @@ using Page = LibXR::SharedPage<Format, Sample, Command, WIRE_TAG>;
 * 类型约束（`PagePod`）：trivially copyable + standard layout；总长是 4 的倍数
   （逐字原子拷贝）。字段偏移与语义是**应用的契约**，用应用侧 `static_assert` 钉住。
 * 布局检查在**编译期**：环与区不重叠、计数器紧贴无填充、区落在页尾、槽位 4B 对齐，
-  全部由 `MakeLayout<F, T, P, TAG>()` 断言。
+  全部由 `MakePageLayout<F, T, P, TAG>()` 断言。
 * 双端互验在**初始化期**：页头记录 abi_version/页长/槽位/双端载荷尺寸/区偏移/TAG，
   `Check()` 逐项比对。字段语义变了而尺寸没变时，递增 `TAG`；帧几何变了换 `Format`。
 * `TAG` 是产品侧的 wire 版本号；不传默认 0。

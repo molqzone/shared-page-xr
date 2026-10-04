@@ -62,14 +62,6 @@ struct TelemetryBatch
   uint8_t reserved[3] = {};
 };
 
-/** @brief Event source for the host data path: a LibXR semaphore, not owned here.
- *
- * 等待侧只需要 `Wait(timeout_ms)`；通知侧由平台绑定持有同一个 `Semaphore&` 并
- * `Post()` / `PostFromCallback(in_isr)`。 borrowed 语义：生命周期归调用方。
- * The wait side needs only `Wait(timeout_ms)`; the platform binding holds the
- * same `Semaphore&` and posts it. Borrowed: the caller owns the lifetime.
- */
-using EventSource = Semaphore;
 
 /**
  * @brief Platform-neutral view of a shared page and its telemetry topic.
@@ -88,7 +80,7 @@ class SharedPageHost : public SharedPage<F, T, P, TAG>
 
   /// @brief Bind a mapped page and the event semaphore guarding its data path.
   ///        A null page pointer or a null event source is refused at construction.
-  SharedPageHost(uint8_t* page_addr, EventSource* event, Topic topic)
+  SharedPageHost(uint8_t* page_addr, Semaphore* event, Topic topic)
       : SharedPage<F, T, P, TAG>(page_addr, topic), event_(event)
   {
     // 无页或无事件源 = 拒绝构造：轮询不是合法退路。
@@ -99,14 +91,14 @@ class SharedPageHost : public SharedPage<F, T, P, TAG>
   }
 
   /// @brief Bind a mapped page and let the adapter create the telemetry topic.
-  SharedPageHost(uint8_t* page_addr, EventSource* event,
+  SharedPageHost(uint8_t* page_addr, Semaphore* event,
                  const char* topic_name = TELEMETRY_TOPIC_NAME)
       : SharedPageHost(page_addr, event, Topic::CreateTopic<Batch>(topic_name))
   {
   }
 
   /// @brief Bind an existing page view (the typical embedded-side shape).
-  SharedPageHost(const SharedPage<F, T, P, TAG>& page, EventSource* event, Topic topic)
+  SharedPageHost(const SharedPage<F, T, P, TAG>& page, Semaphore* event, Topic topic)
       : SharedPage<F, T, P, TAG>(page.Data(), topic), event_(event)
   {
     // 无事件源 = 拒绝构造：轮询不是合法退路。
@@ -115,7 +107,7 @@ class SharedPageHost : public SharedPage<F, T, P, TAG>
   }
 
   /// @brief Bind an existing page view and created topic.
-  SharedPageHost(const SharedPage<F, T, P, TAG>& page, EventSource* event,
+  SharedPageHost(const SharedPage<F, T, P, TAG>& page, Semaphore* event,
                  const char* topic_name = TELEMETRY_TOPIC_NAME)
       : SharedPageHost(page, event, Topic::CreateTopic<Batch>(topic_name))
   {
@@ -218,7 +210,7 @@ class SharedPageHost : public SharedPage<F, T, P, TAG>
   [[nodiscard]] uint32_t LastSeen() const { return last_seen_; }
 
  private:
-  EventSource* event_ = nullptr;
+  Semaphore* event_ = nullptr;
   uint32_t last_seen_ = 0;
   uint64_t busy_since_us_ = 0;
   bool busy_tracking_ = false;

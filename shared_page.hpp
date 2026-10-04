@@ -18,7 +18,7 @@
  * 有界历史的 gap 规则、自洽区域快照，以及 `head`/`seq`/`write_state` 的
  * acquire-release 协议。
  *
- * 几何在**编译期**以 format traits 注入（`DocPageFormat` 只是文档定稿那份格式，不是
+ * 几何在**编译期**以 format traits 注入（`Sg2002PageFormat` 只是文档定稿那份格式，不是
  * 默认真理），在**初始化期**由自描述页头逐项互验——页头照 `sg2002-ipc`
  * `layout_line` 的做法把每个几何数字写出来，`Check()` 逐项比对，任何漂移报
  * `MISMATCH`，绝不静默错读。
@@ -41,14 +41,14 @@ namespace LibXR
 /** @brief Frame format of one platform: the geometry the page contract plays on.
  *
  * 平台数据的载体：页多大、多少槽、帧 ABI 第几版。产品在自己的契约头里指向平台要求
- * 的那份（本仓库的 `DocPageFormat` 对应 `inter-core-protocol.md` 定稿；若平台要求
+ * 的那份（本仓库的 `Sg2002PageFormat` 对应 `inter-core-protocol.md` 定稿；若平台要求
  * 别的几何，换 traits 即可，语义与 API 不动）。
  * The carrier of platform data: page size, slot count, frame ABI version. The product
- * points at whatever its platform mandates in its own contract header (`DocPageFormat`
+ * points at whatever its platform mandates in its own contract header (`Sg2002PageFormat`
  * here matches the `inter-core-protocol.md` final draft; different geometry means a
  * different traits type, with the semantics and API unchanged).
  */
-struct DocPageFormat
+struct Sg2002PageFormat
 {
   static constexpr uint32_t ABI_VERSION = 1;
   static constexpr size_t PAGE_SIZE = 4096;
@@ -82,7 +82,7 @@ static_assert(sizeof(PageHeader) == 32, "PageHeader layout pinned");
 static_assert(offsetof(PageHeader, tag) == 28, "PageHeader layout pinned");
 
 /// @brief In-page telemetry offset (header plus alignment padding).
-inline constexpr size_t telemetry_offset() { return sizeof(PageHeader); }
+inline constexpr size_t TelemetryOffset() { return sizeof(PageHeader); }
 
 /** @brief Result of validating a mapped page.
  *
@@ -167,11 +167,9 @@ struct PageLayout
   uint32_t tag = 0;
 };
 
-namespace detail
-{
 /** @brief Compute and validate the layout of `SharedPage<F, T, P, TAG>`. */
 template <typename F, PagePod T, PagePod P, uint32_t TAG = 0>
-constexpr PageLayout MakeLayout()
+constexpr PageLayout MakePageLayout()
 {
   using Ring = TelemetryRing<T, F::SLOT_COUNT>;
 
@@ -186,7 +184,7 @@ constexpr PageLayout MakeLayout()
   static_assert(sizeof(P) % sizeof(uint32_t) == 0,
                 "the payload type must be a multiple of 4 bytes: region copies are "
                 "word-atomic");
-  static_assert(telemetry_offset() % sizeof(uint32_t) == 0 &&
+  static_assert(TelemetryOffset() % sizeof(uint32_t) == 0 &&
                     (sizeof(T) * F::SLOT_COUNT) % sizeof(uint32_t) == 0,
                 "every ring slot must start 4-byte aligned inside the page");
   static_assert(region_offset<F, P>() % sizeof(uint32_t) == 0,
@@ -201,7 +199,7 @@ constexpr PageLayout MakeLayout()
                 "write_state must follow the payload without padding");
   static_assert(offsetof(Region<P>, seq) == sizeof(P) + sizeof(uint32_t),
                 "seq must follow write_state");
-  static_assert(telemetry_offset() + sizeof(Ring) <= region_offset<F, P>(),
+  static_assert(TelemetryOffset() + sizeof(Ring) <= region_offset<F, P>(),
                 "the telemetry ring and the region must not overlap");
 
   return PageLayout{F::ABI_VERSION,
@@ -271,7 +269,6 @@ class PageCore
   uint8_t* page_ = nullptr;
   PageLayout layout_ = {};
 };
-}  // namespace detail
 
 /** @brief Typed view of the telemetry ring for one sample type. */
 template <PagePod T>
@@ -324,7 +321,7 @@ class Telemetry
   [[nodiscard]] uint32_t SeekToHead() const { return core_.Head(); }
 
  private:
-  detail::TelemetryCore core_;
+  TelemetryCore core_;
 };
 
 /** @brief Typed view of the region for one payload type. */
@@ -383,7 +380,7 @@ class Reference
   }
 
  private:
-  detail::ReferenceCore core_;
+  ReferenceCore core_;
 };
 
 /** @brief Typed view of one mapped page and its topic boundary.
@@ -397,7 +394,7 @@ class SharedPage : public Topic
 {
  public:
   /// @brief The contract instantiation's layout, shared by both cores.
-  static constexpr PageLayout Layout() { return detail::MakeLayout<F, T, P, TAG>(); }
+  static constexpr PageLayout Layout() { return MakePageLayout<F, T, P, TAG>(); }
 
   SharedPage() = default;
 
@@ -451,7 +448,7 @@ class SharedPage : public Topic
   [[nodiscard]] bool Latest(T* sample) const { return TelemetryReader().Latest(sample); }
 
  private:
-  detail::PageCore core_;
+  PageCore core_;
 };
 
 }  // namespace LibXR

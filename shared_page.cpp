@@ -289,11 +289,11 @@ bool PageCore::Valid() const { return page_ != nullptr; }
 
 uint8_t* PageCore::Data() const { return page_; }
 
-PageMagicKind PageCore::Check() const
+PageMagicStatus PageCore::Check() const
 {
   if (page_ == nullptr)
   {
-    return PageMagicKind::UNFORMATTED;
+    return PageMagicStatus::UNFORMATTED;
   }
 
   const auto* header = reinterpret_cast<const PageHeader*>(page_);
@@ -311,7 +311,7 @@ PageMagicKind PageCore::Check() const
         header->sample_size == layout_.sample_size &&
         header->payload_size == layout_.payload_size &&
         header->region_offset == layout_.region_offset && header->tag == layout_.tag;
-    return matches ? PageMagicKind::FORMATTED : PageMagicKind::MISMATCH;
+    return matches ? PageMagicStatus::FORMATTED : PageMagicStatus::MISMATCH;
   }
 
   // A zero page is unformatted; any other invalid header is foreign.
@@ -319,10 +319,10 @@ PageMagicKind PageCore::Check() const
   {
     if (page_[i] != 0)
     {
-      return PageMagicKind::FOREIGN;
+      return PageMagicStatus::FOREIGN;
     }
   }
-  return PageMagicKind::UNFORMATTED;
+  return PageMagicStatus::UNFORMATTED;
 }
 
 void PageCore::Format()

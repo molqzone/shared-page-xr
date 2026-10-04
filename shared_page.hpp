@@ -92,7 +92,7 @@ inline constexpr size_t telemetry_offset() { return sizeof(PageHeader); }
  * tag do not match, meaning the two ends were built against a different frame or wire
  * structure (for example a stale pairing after a runtime firmware replacement).
  */
-enum class PageMagicKind : uint8_t
+enum class PageMagicStatus : uint8_t
 {
   FORMATTED = 0,
   UNFORMATTED = 1,
@@ -262,7 +262,7 @@ class PageCore
 
   [[nodiscard]] bool Valid() const;
   [[nodiscard]] uint8_t* Data() const;
-  [[nodiscard]] PageMagicKind Check() const;
+  [[nodiscard]] PageMagicStatus Check() const;
   void Format();
   void ClearHistory();
   void RecoverStaleClaims();
@@ -407,12 +407,12 @@ class SharedPage : public Topic
 
   [[nodiscard]] bool Valid() const { return core_.Valid(); }
   [[nodiscard]] uint8_t* Data() const { return core_.Data(); }
-  [[nodiscard]] PageMagicKind Check() const { return core_.Check(); }
+  [[nodiscard]] PageMagicStatus Check() const { return core_.Check(); }
   void Format() { core_.Format(); }
   void ClearHistory() { core_.ClearHistory(); }
 
   /// @brief Return whether the page is ready.
-  [[nodiscard]] bool Ready() const { return Check() == PageMagicKind::FORMATTED; }
+  [[nodiscard]] bool Ready() const { return Check() == PageMagicStatus::FORMATTED; }
 
   /** @brief Break write-state claims left behind by a dead peer writer.
    *

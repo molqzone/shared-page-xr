@@ -194,7 +194,7 @@ void test_unbound_page()
 void test_cold_page_and_index(const Mapping& mapping)
 {
   TestPage page(mapping.Data());
-  TEST_ASSERT(page.Check() == PageMagicKind::UNFORMATTED);
+  TEST_ASSERT(page.Check() == PageMagicStatus::UNFORMATTED);
   TEST_ASSERT(!page.Ready());
 
   Sample probe = {};
@@ -208,7 +208,7 @@ void test_cold_page_and_index(const Mapping& mapping)
   TEST_ASSERT(page.WriteSample(make_sample(0)) == 1);
 
   page.Format();
-  TEST_ASSERT(page.Check() == PageMagicKind::FORMATTED);
+  TEST_ASSERT(page.Check() == PageMagicStatus::FORMATTED);
   TEST_ASSERT(page.Ready());
   TEST_ASSERT(page.Region().Seq() == 0);
   TEST_ASSERT(!page.Latest(&probe));
@@ -232,7 +232,7 @@ void test_cold_page_and_index(const Mapping& mapping)
   TEST_ASSERT(page.TelemetryReader().Head() == 0);
   TEST_ASSERT(!page.Latest(&probe));
   // ClearHistory() 只清发布索引，不破坏魔术字。
-  TEST_ASSERT(page.Check() == PageMagicKind::FORMATTED);
+  TEST_ASSERT(page.Check() == PageMagicStatus::FORMATTED);
 }
 
 /// 3. 外来页必须被识别，绝不能被静默使用。A foreign page must be reported, never
@@ -250,10 +250,10 @@ void test_foreign_page(const Mapping& mapping)
   std::memcpy(mapping.Data(), bytes_of(foreign).data(), sizeof(foreign));
 
   TestPage page(mapping.Data());
-  TEST_ASSERT(page.Check() == PageMagicKind::FOREIGN);
+  TEST_ASSERT(page.Check() == PageMagicStatus::FOREIGN);
 
   page.Format();
-  TEST_ASSERT(page.Check() == PageMagicKind::FORMATTED);
+  TEST_ASSERT(page.Check() == PageMagicStatus::FORMATTED);
 }
 
 /// 4. 双端契约漂移：魔术字对、几何/载荷/标签不对，必须报 MISMATCH 而不是静默错读。
@@ -263,29 +263,29 @@ void test_mismatch_page(const Mapping& mapping)
 {
   TestPage page(mapping.Data());
   page.Format();
-  TEST_ASSERT(page.Check() == PageMagicKind::FORMATTED);
+  TEST_ASSERT(page.Check() == PageMagicStatus::FORMATTED);
 
   const TaggedPage drifted(mapping.Data());
-  TEST_ASSERT(drifted.Check() == PageMagicKind::MISMATCH);
+  TEST_ASSERT(drifted.Check() == PageMagicStatus::MISMATCH);
   TEST_ASSERT(!drifted.Ready());
   TEST_ASSERT(drifted.TelemetryReader().Head() == 0);
 
   const SmallPage resized(mapping.Data());
-  TEST_ASSERT(resized.Check() == PageMagicKind::MISMATCH);
+  TEST_ASSERT(resized.Check() == PageMagicStatus::MISMATCH);
 
   // 帧几何漂移同样必须报出来：页头记录几何，不依赖库常量。
   // Frame geometry drift must be reported too: the header records the geometry, no
   // library constants involved.
   const WidePage regeometried(mapping.Data());
-  TEST_ASSERT(regeometried.Check() == PageMagicKind::MISMATCH);
+  TEST_ASSERT(regeometried.Check() == PageMagicStatus::MISMATCH);
 
   // 与外来页不同：MISMATCH 页可以被这一侧的 Format() 重新认领。
   // Unlike a foreign page: a mismatched page can be reclaimed by this side's
   // Format().
   TaggedPage reclaim(mapping.Data());
   reclaim.Format();
-  TEST_ASSERT(reclaim.Check() == PageMagicKind::FORMATTED);
-  TEST_ASSERT(page.Check() == PageMagicKind::MISMATCH);
+  TEST_ASSERT(reclaim.Check() == PageMagicStatus::FORMATTED);
+  TEST_ASSERT(page.Check() == PageMagicStatus::MISMATCH);
 }
 
 /// 5. 发布索引与最新采样。Publish index and the latest sample.

@@ -42,7 +42,7 @@ UAPI——页指针与信号量都是注入的：Linux 侧的 `/dev/mem` 参考�
 * **帧/几何**（页多大、多少槽、什么偏移）是**平台数据**：由平台内存图与 ABI 定
   （例如 sophgo-sg200x-debian 的 `sg2002-ipc`：`CVIMMAP_RTOS_SHM_ADDR` 划区域，
   `sg2002_rtos_shm_layout_line` 自描述页头）。编译期以 format traits 注入
-  （`LibXR::Sg2002PageFormat` 只是 `inter-core-protocol.md` 定稿那4KiB/64 槽格式，不是
+  （`LibXR::SG2002PageFormat` 只是 `inter-core-protocol.md` 定稿那4KiB/64 槽格式，不是
   默认真理）；初始化期由**自描述页头逐项互验**——页头把每个几何数字写在页上，
   照 `sg2002-ipc` `layout_line` 的做法，`Check()` 逐项比对，任何漂移报 `MISMATCH`，
   绝不静默错读。
@@ -52,7 +52,7 @@ UAPI——页指针与信号量都是注入的：Linux 侧的 `/dev/mem` 参考�
 
 ```cpp
 // 产品自己的契约头，双端 include 同一份
-using Format = LibXR::Sg2002PageFormat;      // 平台几何；平台换几何时换 traits
+using Format = LibXR::SG2002PageFormat;      // 平台几何；平台换几何时换 traits
 struct Sample { uint64_t ticks; ... };    // 遥测采样，产品自定字段
 struct Command { ... };                   // 参考区 payload，产品自定字段
 

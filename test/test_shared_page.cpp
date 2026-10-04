@@ -85,7 +85,7 @@ using SmallPage = SharedPage<TestFormat, Sample, SmallPayload>;
 /// 又一份契约：帧几何不同（文档稿的 4096B / 64 槽）——页头必须把这种漂移报出来。
 /// Yet another contract: different frame geometry (the doc's 4096B/64 slots) -- the
 /// header must report this drift too.
-using WidePage = SharedPage<Sg2002PageFormat, Sample, TestProtocolPayload>;
+using WidePage = SharedPage<SG2002PageFormat, Sample, TestProtocolPayload>;
 
 /// 读出一个结构体占用的字节，用于伪造外来页。Read a struct's bytes to forge a page.
 template <typename T>

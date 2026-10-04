@@ -18,7 +18,7 @@
  * 有界历史的 gap 规则、自洽区域快照，以及 `head`/`seq`/`write_state` 的
  * acquire-release 协议。
  *
- * 几何在**编译期**以 format traits 注入（`Sg2002PageFormat` 只是文档定稿那份格式，不是
+ * 几何在**编译期**以 format traits 注入（`SG2002PageFormat` 只是文档定稿那份格式，不是
  * 默认真理），在**初始化期**由自描述页头逐项互验——页头照 `sg2002-ipc`
  * `layout_line` 的做法把每个几何数字写出来，`Check()` 逐项比对，任何漂移报
  * `MISMATCH`，绝不静默错读。
@@ -41,14 +41,14 @@ namespace LibXR
 /** @brief Frame format of one platform: the geometry the page contract plays on.
  *
  * 平台数据的载体：页多大、多少槽、帧 ABI 第几版。产品在自己的契约头里指向平台要求
- * 的那份（本仓库的 `Sg2002PageFormat` 对应 `inter-core-protocol.md` 定稿；若平台要求
+ * 的那份（本仓库的 `SG2002PageFormat` 对应 `inter-core-protocol.md` 定稿；若平台要求
  * 别的几何，换 traits 即可，语义与 API 不动）。
  * The carrier of platform data: page size, slot count, frame ABI version. The product
- * points at whatever its platform mandates in its own contract header (`Sg2002PageFormat`
+ * points at whatever its platform mandates in its own contract header (`SG2002PageFormat`
  * here matches the `inter-core-protocol.md` final draft; different geometry means a
  * different traits type, with the semantics and API unchanged).
  */
-struct Sg2002PageFormat
+struct SG2002PageFormat
 {
   static constexpr uint32_t ABI_VERSION = 1;
   static constexpr size_t PAGE_SIZE = 4096;

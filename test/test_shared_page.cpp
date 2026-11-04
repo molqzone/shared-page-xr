@@ -13,6 +13,8 @@
  *   5. region 的写-读一致性：稳定路径、撕裂重试、BUSY。
  *   6. 写者死亡恢复：claim 窗口内死亡的写者由 `RecoverStaleClaims()` 破除占用，
  *      历史与未发布槽位都不受污染。
+ *   7. 通道表：偏移由布局算出来（环的计数器之后、命令区之前），通告/代次/按名查找走
+ *      库的视图，越界与空名被拒。
  *
  * 运行前提 / Setup: 无。页由匿名映射提供，不需要 `/dev/mem`、root 或任何设备，所以
  * 这套契约在主机上就能验证。
@@ -68,11 +70,12 @@ static_assert(sizeof(TestProtocolPayload) == 24);
 static_assert(sizeof(TestProtocolPayload) % sizeof(uint32_t) == 0);
 
 using TestFormat = LibXRTest::Format;
-using TestPage = SharedPage<TestFormat, Sample, TestProtocolPayload>;
+using TestPage = SharedPage<TestFormat, Sample, TestProtocolPayload, 0, NoCachePolicy>;
 
 /// 另一份契约：同类型、不同 TAG，用来伪造双端 wire 版本漂移。
 /// Another contract: same types, a different TAG, to forge wire version drift.
-using TaggedPage = SharedPage<TestFormat, Sample, TestProtocolPayload, 0x54414731U>;
+using TaggedPage =
+    SharedPage<TestFormat, Sample, TestProtocolPayload, 0x54414731U, NoCachePolicy>;
 
 /// 再一份契约：payload 尺寸不同。
 /// Yet another contract: a different payload size.
@@ -80,12 +83,20 @@ struct SmallPayload
 {
   uint8_t bytes[16] = {};
 };
-using SmallPage = SharedPage<TestFormat, Sample, SmallPayload>;
+using SmallPage = SharedPage<TestFormat, Sample, SmallPayload, 0, NoCachePolicy>;
 
-/// 又一份契约：帧几何不同（文档稿的 4096B / 64 槽）——页头必须把这种漂移报出来。
-/// Yet another contract: different frame geometry (the doc's 4096B/64 slots) -- the
-/// header must report this drift too.
-using WidePage = SharedPage<SG2002PageFormat, Sample, TestProtocolPayload>;
+/// 再一份契约：帧几何不同（4096B / 64 槽，本测试自定）——页头必须把这种漂移报出来。
+/// 本库不带任何 SoC 的默认几何，所以这份几何也只能由测试自己声明。
+/// Yet another contract: different frame geometry (4096B/64 slots, chosen by this test)
+/// -- the header must report this drift too.  The library ships no SoC geometry, so this
+/// one is declared here as well.
+struct WideFormat
+{
+  static constexpr uint32_t ABI_VERSION = 1;
+  static constexpr size_t PAGE_SIZE = 4096;
+  static constexpr uint32_t SLOT_COUNT = 64;
+};
+using WidePage = SharedPage<WideFormat, Sample, TestProtocolPayload, 0, NoCachePolicy>;
 
 /// 读出一个结构体占用的字节，用于伪造外来页。Read a struct's bytes to forge a page.
 template <typename T>
@@ -136,7 +147,10 @@ void test_layout()
   TEST_ASSERT(offsetof(Region<TestProtocolPayload>, write_state) == 24);
   TEST_ASSERT(offsetof(Region<TestProtocolPayload>, seq) == 28);
 
-  TEST_ASSERT(telemetry_offset() == 32);
+  // The ring starts on a cache line, not right after the 32-byte header, so the
+  // ring's head/write_state share no line with whatever follows.
+  TEST_ASSERT(telemetry_offset() == PAGE_CACHE_LINE);
+  TEST_ASSERT((telemetry_offset() + sizeof(Sample) * slots) % PAGE_CACHE_LINE == 0);
   TEST_ASSERT((region_offset<TestFormat, TestProtocolPayload>() == 2048 - 32));
   TEST_ASSERT((telemetry_offset() + sizeof(Ring) <=
                region_offset<TestFormat, TestProtocolPayload>()));
@@ -193,7 +207,7 @@ void test_unbound_page()
 /// 2. 冷页、Format() 与发布索引。Cold page, Format(), and the publish index.
 void test_cold_page_and_index(const Mapping& mapping)
 {
-  TestPage page(mapping.Data());
+  TestPage page(mapping.Data(), LibXR::no_coherence());
   TEST_ASSERT(page.Check() == PageMagicStatus::UNFORMATTED);
   TEST_ASSERT(!page.Ready());
 
@@ -249,7 +263,7 @@ void test_foreign_page(const Mapping& mapping)
                               .tag = 0};
   std::memcpy(mapping.Data(), bytes_of(foreign).data(), sizeof(foreign));
 
-  TestPage page(mapping.Data());
+  TestPage page(mapping.Data(), LibXR::no_coherence());
   TEST_ASSERT(page.Check() == PageMagicStatus::FOREIGN);
 
   page.Format();
@@ -261,28 +275,28 @@ void test_foreign_page(const Mapping& mapping)
 ///    tag, must be reported as MISMATCH instead of silently misread.
 void test_mismatch_page(const Mapping& mapping)
 {
-  TestPage page(mapping.Data());
+  TestPage page(mapping.Data(), LibXR::no_coherence());
   page.Format();
   TEST_ASSERT(page.Check() == PageMagicStatus::FORMATTED);
 
-  const TaggedPage drifted(mapping.Data());
+  const TaggedPage drifted(mapping.Data(), LibXR::no_coherence());
   TEST_ASSERT(drifted.Check() == PageMagicStatus::MISMATCH);
   TEST_ASSERT(!drifted.Ready());
   TEST_ASSERT(drifted.TelemetryReader().Head() == 0);
 
-  const SmallPage resized(mapping.Data());
+  const SmallPage resized(mapping.Data(), LibXR::no_coherence());
   TEST_ASSERT(resized.Check() == PageMagicStatus::MISMATCH);
 
   // 帧几何漂移同样必须报出来：页头记录几何，不依赖库常量。
   // Frame geometry drift must be reported too: the header records the geometry, no
   // library constants involved.
-  const WidePage regeometried(mapping.Data());
+  const WidePage regeometried(mapping.Data(), LibXR::no_coherence());
   TEST_ASSERT(regeometried.Check() == PageMagicStatus::MISMATCH);
 
   // 与外来页不同：MISMATCH 页可以被这一侧的 Format() 重新认领。
   // Unlike a foreign page: a mismatched page can be reclaimed by this side's
   // Format().
-  TaggedPage reclaim(mapping.Data());
+  TaggedPage reclaim(mapping.Data(), LibXR::no_coherence());
   reclaim.Format();
   TEST_ASSERT(reclaim.Check() == PageMagicStatus::FORMATTED);
   TEST_ASSERT(page.Check() == PageMagicStatus::MISMATCH);
@@ -291,7 +305,7 @@ void test_mismatch_page(const Mapping& mapping)
 /// 5. 发布索引与最新采样。Publish index and the latest sample.
 void test_latest(const Mapping& mapping)
 {
-  TestPage page(mapping.Data());
+  TestPage page(mapping.Data(), LibXR::no_coherence());
   for (uint32_t index = 0; index < 3; ++index)
   {
     TEST_ASSERT(page.TelemetryWriter().Write(make_sample(index)) == index + 1);
@@ -317,7 +331,7 @@ void test_latest(const Mapping& mapping)
 /// 6. `Since()` 的区间、上界与 gap。Range, bound and gap of `Since()`.
 void test_since(const Mapping& mapping)
 {
-  TestPage page(mapping.Data());
+  TestPage page(mapping.Data(), LibXR::no_coherence());
   page.ClearHistory();
   auto writer = page.TelemetryWriter();
   const auto reader = page.TelemetryReader();
@@ -426,7 +440,7 @@ void test_since(const Mapping& mapping)
 ///    Stable region reads, the retry budget and the BUSY verdict.
 void test_region(const Mapping& mapping)
 {
-  TestPage page(mapping.Data());
+  TestPage page(mapping.Data(), LibXR::no_coherence());
   page.ClearHistory();
   auto reference = page.Region();
 
@@ -498,7 +512,7 @@ void test_region(const Mapping& mapping)
 ///    claims and the history survives.
 void test_stale_claims(const Mapping& mapping)
 {
-  TestPage page(mapping.Data());
+  TestPage page(mapping.Data(), LibXR::no_coherence());
   page.ClearHistory();
   auto writer = page.TelemetryWriter();
   writer.Write(make_sample(0));
@@ -542,6 +556,77 @@ void test_stale_claims(const Mapping& mapping)
   TEST_ASSERT(page.Region().Read(&payload, nullptr) == ErrorCode::OK);
 }
 
+
+/// 通道表：布局偏移、通告、代次与按名查找。
+/// Channel table: layout offset, announcement, generation and lookup by name.
+void test_channel_table(const Mapping& mapping)
+{
+  TestPage page(mapping.Data(), no_coherence());
+  page.Format();
+
+  constexpr PageLayout layout = TestPage::Layout();
+  constexpr size_t table_offset = channel_offset(layout);
+  constexpr size_t ring_end = telemetry_offset() + layout.slot_count * layout.sample_size;
+
+  // 偏移是布局算出来的：环的计数器之后的那条缓存行，且在命令区之前。
+  TEST_ASSERT(table_offset >= ring_end + 2 * sizeof(uint32_t));
+  TEST_ASSERT(table_offset % PAGE_CACHE_LINE == 0);
+  TEST_ASSERT(table_offset < layout.region_offset);
+  TEST_ASSERT(channel_table_fits<2>(layout));
+
+  auto table = page.Channels<2>();
+  TEST_ASSERT(!table.Valid());  // 还没通告过
+  TEST_ASSERT(table.Generation() == 0u);
+
+  constexpr ChannelAnnouncement channels[] = {
+      {"alpha", 0x11u, CHANNEL_FLAG_PRESENT},
+      {"beta", 0x22u, CHANNEL_FLAG_PRESENT},
+  };
+  TEST_ASSERT(table.Publish(channels, 2));
+  TEST_ASSERT(table.Valid());
+  TEST_ASSERT(table.Generation() == 1u);
+
+  ChannelEntry entry{};
+  TEST_ASSERT(table.Find("beta", &entry));
+  TEST_ASSERT(entry.endpoint == 0x22u);
+  TEST_ASSERT(entry.flags == CHANNEL_FLAG_PRESENT);
+  TEST_ASSERT(entry.key == CRC32::Calculate("beta", 4));
+  TEST_ASSERT(entry.name_len == 4u);
+  TEST_ASSERT(std::memcmp(entry.name, "beta", 4) == 0);
+  TEST_ASSERT(!table.Find("gamma", &entry));
+
+  // 一次通告是一整代：代次自增，上一代的名字不再存在。
+  constexpr ChannelAnnouncement next[] = {{"alpha", 0x33u, CHANNEL_FLAG_PRESENT}};
+  TEST_ASSERT(table.Publish(next, 1));
+  TEST_ASSERT(table.Generation() == 2u);
+  TEST_ASSERT(table.Find("alpha", &entry));
+  TEST_ASSERT(entry.endpoint == 0x33u);
+  TEST_ASSERT(!table.Find("beta", &entry));
+
+  // 越界、空名、放不进条目的名字都被拒，且不破坏当前这一代。
+  TEST_ASSERT(!table.Publish(channels, 3));
+  constexpr ChannelAnnouncement empty_name[] = {{"", 0u, CHANNEL_FLAG_PRESENT}};
+  TEST_ASSERT(!table.Publish(empty_name, 1));
+  constexpr ChannelAnnouncement long_name[] = {
+      {"abcdefghijklmnopqrstuvwxyz012", 0u, CHANNEL_FLAG_PRESENT}};
+  TEST_ASSERT(!table.Publish(long_name, 1));
+  TEST_ASSERT(table.Generation() == 2u);
+  TEST_ASSERT(table.Find("alpha", &entry));
+
+  // 名字长度上限是条目自己的容量：刚好放得下就收。
+  constexpr ChannelAnnouncement exact[] = {
+      {"abcdefghijklmnopqrstuvwxyz01", 0x44u, CHANNEL_FLAG_PRESENT}};
+  TEST_ASSERT(table.Publish(exact, 1));
+  TEST_ASSERT(table.Find("abcdefghijklmnopqrstuvwxyz01", &entry));
+  TEST_ASSERT(entry.endpoint == 0x44u);
+
+  // 魔数被破坏时报“没通告”，而不是把残留字节当通道。
+  auto* raw = reinterpret_cast<ChannelTable<2>*>(page.Data() + table_offset);
+  raw->magic = 0u;
+  TEST_ASSERT(!table.Valid());
+  TEST_ASSERT(!table.Find("abcdefghijklmnopqrstuvwxyz01", &entry));
+}
+
 }  // namespace
 
 int main()
@@ -558,6 +643,7 @@ int main()
     test_since(mapping);
     test_region(mapping);
     test_stale_claims(mapping);
+    test_channel_table(mapping);
   }
 
   return 0;

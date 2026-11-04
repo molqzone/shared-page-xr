@@ -2,105 +2,190 @@
 
 /**
  * @file linux_mapping.hpp
- * @brief Linux reference binding: /dev/mem mapping of one shared page.
+ * @brief Linux 侧的页映射绑定：UIO 设备节点，而不是 `/dev/mem`。
+ *        The Linux-side page mapping: a UIO device node, not `/dev/mem`.
  *
- * **平台参考绑定，不是中立核心的一部分**：只有 Linux 消费者 include 本文件，
- * 它才进入编译；中立核心（`shared_page.hpp` / `host_shared_page.hpp`）不引用它。
- * 其他平台按同一形状注入页指针即可（链接脚本符号、静态缓冲、块设备映射……）。
- * Linux reference binding, deliberately not part of the neutral core: only a
- * Linux consumer includes this file, so it enters compilation there; the
- * neutral core does not reference it. Other platforms inject the page pointer
- * in the same shape (linker-script symbol, static buffer, block device
- * mapping, ...).
+ * **平台绑定，不是中立核心**：只有 Linux 消费者 include 本文件它才进入编译；
+ * `shared_page.hpp` / `command_channel.hpp` / `doorbell.hpp` 都不引用它。
+ * A platform binding, not part of the neutral core: only a Linux consumer includes it.
  *
- * SG2002 场景里 C906L 共享页位于内核保留内存图内，Linux 大核经 `/dev/mem`
- * 映射同一物理页与固件会合；映射地址由 yaml 配置注入，不进任何契约。
- * On SG2002 the C906L shared page lives inside the reserved kernel memory map
- * and the Linux core maps the same physical page through `/dev/mem` to meet
- * the firmware; the physical address is injected through configuration and is
- * not part of any contract.
+ * 两页（console、共享页）在设备树里声明成一个 `generic-uio` 节点、两段 `reg`，
+ * `uio_pdrv_genirq` 把它们暴露成 `/dev/uioN` 的两个 mmap 索引：索引 0 = console 页，
+ * 索引 1 = 共享页（`uio` 用 `vma->vm_pgoff` 当索引，所以偏移是 `index * 页大小`）。
+ * 节点**没有中断**：mailbox 的中断 101 被 `cv181x_rtos_cmdqu` 独占，通知走它的
+ * `RTOS_CMDQU_WAIT_EVENT`。
+ *
+ * The two pages (console, shared) are one `generic-uio` node with two `reg` entries; the
+ * driver exposes them as two mmap indices on `/dev/uioN`: index 0 is the console page,
+ * index 1 the shared page (`uio` treats `vma->vm_pgoff` as the index, so the offset is
+ * `index * page size`).  The node carries **no interrupt**: mailbox IRQ 101 is owned
+ * exclusively by `cv181x_rtos_cmdqu`, and notifications ride its
+ * `RTOS_CMDQU_WAIT_EVENT` ioctl.
+ *
+ * 这个类也回答**它的一致性域是谁**：`uio` 的 `mmap` 在 `UIO_MEM_PHYS` 上强制
+ * `pgprot_noncached`（`drivers/uio/uio.c`），字节直通内存，所以 `Coherence()` 是
+ * `no_coherence()`，与 `/dev/mem` 的语义一致——只是不再需要 root 和宽权限的
+ * `/dev/mem`。
+ *
+ * This class also answers *which coherency domain it is*: `uio`'s `mmap` forces
+ * `pgprot_noncached` for `UIO_MEM_PHYS` (`drivers/uio/uio.c`), so the bytes go straight
+ * to memory and `Coherence()` is `no_coherence()` -- the same semantics as `/dev/mem`,
+ * without needing root and a wide-open `/dev/mem`.
  */
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "shared_page.hpp"
+
 namespace LibXR
 {
-
-/** @brief `/dev/mem` mapping of one shared page. Linux only.
+/** @brief 一个 uio 映射：按 sysfs 里的 uio 名字找到设备，再按 map 索引映射。
+ *         One uio mapping: find the device by its sysfs name, then map one index.
  *
- * 全局生命周期约定（与 LibXR 的分配一次、永不释放一致）：映射在进程生命周期内
- * 有效，不 munmap、不关 fd，析构时什么也不做——所以这个类干脆没有析构函数。
- * 对象本身是可拷贝的只读视图（与库内其它视图同风格），拷贝即同一映射的另一个
- * 视图；`Data() == nullptr` 表示映射失败。
- * Global-lifetime convention (matching the LibXR allocate-once, never-release
- * rule): the mapping lives for the process lifetime -- no munmap, no close,
- * nothing at destruction time, so this class simply has no destructor. The
- * object is a copyable read-only view (same style as the library's other
- * views); copying yields another view of the same mapping. `Data() == nullptr`
- * marks a failed mapping.
+ * 全局生命周期约定与库内其它视图一致：映射在整个进程生命周期内有效，不 munmap、
+ * 不关 fd；对象是可拷贝的只读视图，`Data() == nullptr` 表示映射失败。
+ * Same global-lifetime convention as the rest of the library: the mapping lives for the
+ * process lifetime (no munmap, no close), and the object is a copyable view whose
+ * `Data() == nullptr` marks a failed mapping.
  */
-class LinuxMapping
+class UioMapping
 {
  public:
-  /// @brief Map `page_bytes` at `physical_address`. A failed mapping leaves the
-  ///        object invalid; check `Data() != nullptr` before use.
-  static LinuxMapping Open(uint64_t physical_address, size_t page_bytes)
+  /// @brief 按 uio 名字（`/sys/class/uio/uioN/name`）与 map 索引映射 `bytes` 字节。
+  ///        Map `bytes` from the uio device named `name`, at `map_index`.
+  static UioMapping Open(const char* name, uint32_t map_index, size_t bytes)
   {
-    LinuxMapping mapping;
-    if (physical_address == 0 || page_bytes == 0)
+    UioMapping mapping;
+    if (name == nullptr || bytes == 0)
     {
       return mapping;
     }
 
-    const int64_t system_page_size = ::sysconf(_SC_PAGESIZE);
-    if (system_page_size <= 0)
+    const int64_t page = ::sysconf(_SC_PAGESIZE);
+    if (page <= 0)
     {
       return mapping;
     }
 
-    const uint64_t page_size = static_cast<uint64_t>(system_page_size);
-    const uint64_t page_base = physical_address & ~(page_size - 1U);
-    const size_t page_offset = static_cast<size_t>(physical_address - page_base);
-    const size_t map_size = ((page_offset + page_bytes + page_size - 1U) / page_size) *
-                            static_cast<size_t>(page_size);
-
-    mapping.fd = ::open("/dev/mem", O_RDWR | O_SYNC);
-    if (mapping.fd < 0)
+    const std::string device = FindDevice(name);
+    if (device.empty())
     {
       return mapping;
     }
 
-    mapping.base = ::mmap(nullptr, map_size, PROT_READ | PROT_WRITE, MAP_SHARED, mapping.fd,
-                          static_cast<off_t>(page_base));
-    if (mapping.base == MAP_FAILED)
+    const int fd = ::open(device.c_str(), O_RDWR);
+    if (fd < 0)
     {
-      // Leave data null: the caller's validity check rejects the object. The
-      // fd and any partial state stay as they are under the global-lifetime
-      // convention; this is a one-time bind failure path.
-      mapping.base = nullptr;
       return mapping;
     }
 
-    mapping.data = static_cast<uint8_t*>(mapping.base) + page_offset;
-    mapping.length = map_size;
+    // uio 用 vm_pgoff 当 map 索引，所以第 N 段要从 N 页的偏移开始映射。
+    // uio takes vm_pgoff as the map index, so map N starts N pages in.
+    const off_t offset = static_cast<off_t>(map_index) * static_cast<off_t>(page);
+    void* base = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, offset);
+    if (base == MAP_FAILED)
+    {
+      // 全局生命周期约定：失败路径不关闭 fd，映射本就不存在。
+      // Global-lifetime convention: no close on the failure path; nothing was mapped.
+      return mapping;
+    }
+
+    mapping.base_ = base;
+    mapping.data_ = static_cast<uint8_t*>(base);
+    mapping.size_ = bytes;
+    mapping.fd_ = fd;
+    if (device.size() < sizeof(mapping.path_))
+    {
+      std::memcpy(mapping.path_, device.c_str(), device.size() + 1);
+    }
     return mapping;
   }
 
-  LinuxMapping() = default;
+  UioMapping() = default;
 
-  [[nodiscard]] uint8_t* Data() const { return data; }
+  [[nodiscard]] uint8_t* Data() const { return data_; }
+  [[nodiscard]] size_t Size() const { return size_; }
+  /// @brief 映射的 uio 设备节点（诊断用，例如 `/dev/uio0`）。
+  ///        The mapped uio node (diagnostics, e.g. `/dev/uio0`).
+  [[nodiscard]] const char* DevicePath() const { return path_; }
+  explicit operator bool() const { return data_ != nullptr; }
+
+  /// @brief 这个映射的一致性域：non-cacheable，没有对端需要维护。
+  ///        The coherency domain: non-cacheable, no peer to maintain.
+  ///
+  /// 返回的是**策略类型**（`NoCachePolicy`）：页的一致性域在编译期就定了，映射只是
+  /// 给出它是哪一个。`Page page(mapping.Data(), mapping.Coherence())` 因此零间接。
+  /// Returns the **policy type** (`NoCachePolicy`): a page's domain is fixed at compile
+  /// time and the mapping only names it, so `Page page(mapping.Data(), mapping.Coherence())`
+  /// costs no indirect call.
+  static NoCachePolicy Coherence() { return {}; }
+
+  /// @brief 底层映射基址（交给别的 mmap 包装持有，不额外 munmap）。
+  ///        The mapping base, for another mmap view to hold (no extra munmap).
+  [[nodiscard]] void* Base() const { return base_; }
 
  private:
-  void* base = nullptr;
-  uint8_t* data = nullptr;
-  size_t length = 0;
-  int fd = -1;
+  /// @brief 在 `/sys/class/uio/*/name` 里找同名设备，返回 `/dev/uioN`。
+  ///        Find the same-named device under `/sys/class/uio/*/name`, return `/dev/uioN`.
+  static std::string FindDevice(const char* name)
+  {
+    DIR* directory = ::opendir("/sys/class/uio");
+    if (directory == nullptr)
+    {
+      return {};
+    }
+
+    std::string found;
+    while (dirent* entry = ::readdir(directory))
+    {
+      // 只认 uioN，跳过 `.`/`..` 和别的条目。
+      // Only uioN: skip `.`, `..` and anything else.
+      if (std::strncmp(entry->d_name, "uio", 3) != 0 || entry->d_name[3] == '\0')
+      {
+        continue;
+      }
+
+      const std::string path = std::string("/sys/class/uio/") + entry->d_name + "/name";
+      std::FILE* file = std::fopen(path.c_str(), "r");
+      if (file == nullptr)
+      {
+        continue;
+      }
+      char device_name[64] = {};
+      const size_t read = std::fread(device_name, 1, sizeof(device_name) - 1, file);
+      std::fclose(file);
+      while (read != 0 && (device_name[read - 1] == '\n' || device_name[read - 1] == '\r'))
+      {
+        device_name[read - 1] = '\0';
+      }
+      if (read == 0 || std::strcmp(device_name, name) != 0)
+      {
+        continue;
+      }
+
+      found = std::string("/dev/") + entry->d_name;
+      break;
+    }
+
+    ::closedir(directory);
+    return found;
+  }
+
+  void* base_ = nullptr;
+  uint8_t* data_ = nullptr;
+  size_t size_ = 0;
+  int fd_ = -1;
+  char path_[64] = {};
 };
 
 }  // namespace LibXR

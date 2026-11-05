@@ -421,20 +421,44 @@ PageMagicStatus PageCore<Policy>::Check() const
 }
 
 template <CoherencePolicyType Policy>
+PageMagicStatus PageCore<Policy>::Initialize()
+{
+  const auto status = Check();
+
+  // 只建冷页。已建立的页直接用；漂移与外来页原样返回，让调用方致命失败——
+  // 自动格式化会把 `TAG`/几何漂移这个唯一探针抹掉。
+  // Only a cold page is built. A formatted page is reused; a drift or a foreign
+  // page is returned as-is so the caller fails fatally -- auto-formatting would
+  // erase the only probe for `TAG`/geometry drift.
+  if (status == PageMagicStatus::UNFORMATTED)
+  {
+    Format();
+    return Check();
+  }
+  return status;
+}
+
+template <CoherencePolicyType Policy>
 void PageCore<Policy>::Format()
 {
   if (page_ == nullptr)
   {
     return;
   }
-
   // 整页重写：一个 WRITE 窗口，离开时把整页脏行推回。
   // The whole page is rewritten: one WRITE window pushes every dirty line back on
   // exit.
   AccessWindow<Policy> page_window(coherence_, page_, layout_.page_size, AccessIntent::WRITE);
   std::memset(page_, 0, layout_.page_size);
   auto* header = reinterpret_cast<PageHeader*>(page_);
-  header->magic = PAGE_MAGIC;
+  // 先写正文，magic 最后写。页头是固定布局（magic 在偏移 0），所以这里靠的是
+  // **同一个 WRITE 窗口内的写顺序**：对端在一次 clean 之后只会看到"全零"或
+  // "完整的一页"，不会看到半张页——就绪门的性质由窗口的原子推回保证，而不是
+  // 靠把 magic 挪到别的偏移。
+  // Body first, magic last. The header layout is fixed (magic at offset 0), so the
+  // ordering lives *inside* one WRITE window: after the single clean a peer sees
+  // either an all-zero page or a complete one, never half a page. The readiness
+  // gate comes from the window's atomic push-back, not from moving the magic.
   header->abi_version = layout_.abi_version;
   header->page_size = layout_.page_size;
   header->slot_count = layout_.slot_count;
@@ -442,6 +466,27 @@ void PageCore<Policy>::Format()
   header->payload_size = layout_.payload_size;
   header->region_offset = layout_.region_offset;
   header->tag = layout_.tag;
+  header->magic = PAGE_MAGIC;
+
+  // 写完必须让它在 DRAM 里立刻可见，不能指望窗口退出的那次 clean 一定生效：
+  // `Format()` 是页上唯一一次"写完马上就会被读"的操作，而且跑在 bring-up 很早的位置，
+  // 缓存状态与稳态不同（C906 的维护指令与 `MHCR.DE` 的时序坑见
+  // `driver/shared_page/sg200x_cache_policy.hpp`）。
+  //
+  // 顺序只能是一次 clean+invalidate（`Sync`），不能"clean 完再读回"：读回本身先
+  // invalidate，脏行会在被证明之前丢掉——这正是之前"格式化完页在 DRAM 里仍是全零"
+  // 的成因。失败留给调用方的 `Check()`，不会静默留在缓存里。
+  //
+  // The write must be visible in DRAM immediately; the window's clean on exit is not
+  // proof.  `Format()` is the one operation whose writes are read straight away and it
+  // runs early in bring-up, where the cache state is not the steady-state one (see the
+  // policy header for the maintenance/MHCR.DE history).
+  //
+  // The order must be one clean+invalidate (`Sync`), not "clean, then read back": a
+  // read-back invalidates first and discards the dirty lines before they are proven --
+  // exactly how a formatted page ended up all zeroes in DRAM.  A failure is left to the
+  // caller's `Check()` instead of staying silently dirty.
+  coherence_.Sync(page_, layout_.page_size);
 }
 
 template <CoherencePolicyType Policy>

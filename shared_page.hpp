@@ -133,6 +133,23 @@ enum class PageMagicStatus : uint8_t
   MISMATCH = 3,
 };
 
+/** @brief Name of a page status, for logs and CLI output. */
+[[nodiscard]] inline const char* MagicName(PageMagicStatus status)
+{
+  switch (status)
+  {
+    case PageMagicStatus::FORMATTED:
+      return "FORMATTED";
+    case PageMagicStatus::UNFORMATTED:
+      return "UNFORMATTED";
+    case PageMagicStatus::FOREIGN:
+      return "FOREIGN";
+    case PageMagicStatus::MISMATCH:
+      return "MISMATCH";
+  }
+  return "UNKNOWN";
+}
+
 /** @brief Result data returned by `Telemetry::Since()`. */
 struct SinceResult
 {
@@ -703,6 +720,22 @@ class PageCore
   [[nodiscard]] bool Valid() const;
   [[nodiscard]] uint8_t* Data() const;
   [[nodiscard]] PageMagicStatus Check() const;
+
+  /** @brief Bring the page up: build a cold page, refuse anything else.
+   *
+   *  冷页（全零、没人认领过）由这一侧建立；已建立的页直接复用；几何漂移
+   *  （`MISMATCH`）与外来页（`FOREIGN`）**一律不格式化**，原样返回让调用方
+   *  当致命错误——自动格式化会把 `TAG`/几何漂移这个唯一的探针抹掉。
+   *
+   *  A cold page (all zeroes, never claimed) is built by whichever side binds
+   *  first; an already-formatted page is reused; a geometry drift (`MISMATCH`)
+   *  or a foreign page (`FOREIGN`) is *never* formatted -- the status is
+   *  returned for the caller to treat as fatal, because auto-formatting would
+   *  erase the only probe for `TAG`/geometry drift.
+   *
+   *  @return `FORMATTED` when the page is usable, otherwise the reason it is not.
+   */
+  [[nodiscard]] PageMagicStatus Initialize();
   void Format();
   void ClearHistory();
   void RecoverStaleClaims();
@@ -878,6 +911,22 @@ class SharedPage : public Topic
   ///        inherits it instead of silently dropping it.
   [[nodiscard]] const Policy& Coherence() const { return core_.Coherence(); }
   [[nodiscard]] PageMagicStatus Check() const { return core_.Check(); }
+
+  /** @brief Bring the page up: build a cold page, refuse a drifted one.
+   *
+   *  发布方在开始写之前调一次。冷页（全零）由本侧建立；已建立的页复用；
+   *  几何漂移（`MISMATCH`）与外来页（`FOREIGN`）原样返回，**不**自动格式化
+   *  ——那正是 `TAG`/几何漂移唯一的探针。返回值不是 `FORMATTED` 就必须当
+   *  致命错误处理：静默跳过发布曾经让整条遥测链停掉几天而无人发现。
+   *
+   *  A publisher calls this once before writing. A cold page is built by this
+   *  side; a formatted page is reused; a drift (`MISMATCH`) or foreign page
+   *  (`FOREIGN`) is returned as-is and *not* auto-formatted -- that is the only
+   *  probe for `TAG`/geometry drift. Anything but `FORMATTED` must be treated
+   *  as fatal: silently skipping the publish once stopped the whole telemetry
+   *  path for days without anyone noticing.
+   */
+  [[nodiscard]] PageMagicStatus Initialize() { return core_.Initialize(); }
   void Format() { core_.Format(); }
   void ClearHistory() { core_.ClearHistory(); }
 

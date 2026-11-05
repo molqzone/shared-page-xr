@@ -144,8 +144,8 @@ void test_invalid_payload_is_rejected()
   TEST_ASSERT(seq == 0);
 }
 
-/// 3. 页未格式化：回执拒绝——Linux 负责格式化，没有页头就没有命令槽。
-///    3. Unformatted page: rejected; Linux owns formatting, so there is no slot.
+/// 3. 页未建立：回执拒绝——发布方负责建页，这里没有页头就没有命令槽。
+///    3. Unformatted page: rejected; the publisher owns bringing the page up.
 void test_unformatted_page_is_rejected()
 {
   TestPage page(g_cold_storage.data(), LibXR::no_coherence());

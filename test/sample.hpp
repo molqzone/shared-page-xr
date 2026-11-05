@@ -27,11 +27,11 @@
 
 namespace LibXRTest
 {
-/** @brief 测试帧格式：刻意取 2048B 页 / 32 槽，与 `SG2002PageFormat` 的 4096B / 64
- *  槽不同——页几何跟着注入的 format 走，不是库常量。
- *  Test frame format: deliberately a 2048B page with 32 slots, unlike
- *  `SG2002PageFormat`'s 4096B/64, so the page geometry demonstrably follows the
- *  injected format rather than library constants.
+/** @brief 测试帧格式：刻意取 2048B 页 / 32 槽，与产品几何（4KiB/58 槽）不同——页几何
+ *  跟着注入的 format 走，不是库常量。
+ *  Test frame format: deliberately a 2048B page with 32 slots, unlike the product's
+ *  geometry (4KiB/58), so the page geometry demonstrably follows the injected format
+ *  rather than library constants.
  */
 struct Format
 {

@@ -63,7 +63,7 @@ inline constexpr uint32_t COMMAND_REJECTED = UINT32_MAX;
  * 不必保证页对象的生命周期比通道长。
  *
  * 去重：同一区域 `seq` 的重复通知（doorbell 合并，或发送方没收到回执而重试）不重放
- * 命令，只重发上一次的回执——否则发送方会超时，而重放会把 LED/PARK 这类命令执行
+ * 命令，只重发上一次的回执——否则发送方会超时，而重放会把"点亮 LED"这类有副作用的命令执行
  * 第二次。
  *
  * Same template parameters as `SharedPage`, because the region offset follows `F`/`P`
@@ -73,8 +73,8 @@ inline constexpr uint32_t COMMAND_REJECTED = UINT32_MAX;
  *
  * Dedup: a repeated notification for the same region `seq` (coalesced doorbells, or a
  * sender retrying because it missed the reply) does not replay the command; it resends
- * the previous reply. Otherwise the sender times out, and replaying would run an
- * LED/PARK command twice.
+ * the previous reply. Otherwise the sender times out, and replaying would run a
+ * side-effecting command ("turn the LED on") twice.
  */
 template <typename F, PagePod T, PagePod P, uint32_t TAG = 0,
           CoherencePolicyType Policy = FunctionPointerPolicy>
@@ -120,8 +120,8 @@ class CommandChannel
 
     if (!page_.Ready())
     {
-      // Linux 负责格式化；没有页头就没有命令槽可读。
-      // Linux owns formatting; without a header there is no slot to read.
+      // 页没建起来（漂移或外来页）：没有页头就没有命令槽可读，回执拒绝。
+      // The page was not brought up (drift or foreign): no header, no slot to read.
       doorbell_.Reply(COMMAND_REJECTED);
       return ErrorCode::FAILED;
     }

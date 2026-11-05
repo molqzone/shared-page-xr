@@ -55,7 +55,7 @@
  * 一铃多路（例如同一门铃同时承载命令与 maint 请求），这里改成
  * `Wait(timeout, uint32_t* channel)` 并在合同里写清每个通道的归属即可，调用方那两处
  * 加一个实参，不需要重排分层。
- * This product's doorbell has exactly one command channel: Linux only parks requests in
+ * This product's doorbell has exactly one command channel: Linux only places requests in
  * command contexts, and the notification bit is only ever rung by the firmware.  With no
  * multiplexing there is no "which one fired" question -- a return value would be a
  * constant parameter.  If a second channel ever shares the doorbell (commands plus

@@ -302,6 +302,57 @@ void test_mismatch_page(const Mapping& mapping)
   TEST_ASSERT(page.Check() == PageMagicStatus::MISMATCH);
 }
 
+/// 4.5 `Initialize()`：冷页由它建立，漂移页一律不建。
+///     `Initialize()`: it builds a cold page and never builds a drifted one.
+void test_initialize(const Mapping& mapping)
+{
+  // 冷页：Initialize() 建页，历史清零，页头是这一侧的契约。
+  // Cold page: Initialize() builds it, the history is zeroed and the header is
+  // this side's contract.
+  // 前一个测试在页上留了别的几何，先清回冷页。
+  // The previous test left a different geometry on the page; clear it back to
+  // cold first.
+  std::memset(mapping.Data(), 0, TestFormat::PAGE_SIZE);
+  TestPage page(mapping.Data(), LibXR::no_coherence());
+  TEST_ASSERT(page.Check() == PageMagicStatus::UNFORMATTED);
+  TEST_ASSERT(page.Initialize() == PageMagicStatus::FORMATTED);
+  TEST_ASSERT(page.Ready());
+  TEST_ASSERT(page.TelemetryReader().Head() == 0);
+
+  // 已建立的页：Initialize() 是幂等的，不动已有历史。
+  // An already-formatted page: Initialize() is idempotent and leaves the
+  // existing history alone.
+  const Sample sample = make_sample(7);
+  page.WriteSample(sample);
+  const uint32_t head = page.TelemetryReader().Head();
+  TEST_ASSERT(page.Initialize() == PageMagicStatus::FORMATTED);
+  TEST_ASSERT(page.TelemetryReader().Head() == head);
+
+  // 几何漂移：Initialize() 拒绝建页，页头保持原样（探针不能被抹掉）。
+  // Geometry drift: Initialize() refuses to build and leaves the header as it
+  // was -- the probe must not be erased.
+  TaggedPage drifted(mapping.Data(), LibXR::no_coherence());
+  TEST_ASSERT(drifted.Initialize() == PageMagicStatus::MISMATCH);
+  TEST_ASSERT(drifted.Check() == PageMagicStatus::MISMATCH);
+  TEST_ASSERT(drifted.TelemetryReader().Head() == head);
+
+  // 外来页：同样拒绝。
+  // A foreign page: refused too.
+  std::memset(mapping.Data(), 0, TestFormat::PAGE_SIZE);
+  const PageHeader foreign = {.magic = 0x11223344U,
+                              .abi_version = 1,
+                              .page_size = static_cast<uint32_t>(TestFormat::PAGE_SIZE),
+                              .slot_count = TestFormat::SLOT_COUNT,
+                              .sample_size = sizeof(Sample),
+                              .payload_size = sizeof(TestProtocolPayload),
+                              .region_offset = 0,
+                              .tag = 0};
+  std::memcpy(mapping.Data(), bytes_of(foreign).data(), sizeof(foreign));
+  TestPage foreign_page(mapping.Data(), LibXR::no_coherence());
+  TEST_ASSERT(foreign_page.Initialize() == PageMagicStatus::FOREIGN);
+  TEST_ASSERT(foreign_page.Check() == PageMagicStatus::FOREIGN);
+}
+
 /// 5. 发布索引与最新采样。Publish index and the latest sample.
 void test_latest(const Mapping& mapping)
 {
@@ -639,6 +690,7 @@ int main()
     test_cold_page_and_index(mapping);
     test_foreign_page(mapping);
     test_mismatch_page(mapping);
+    test_initialize(mapping);
     test_latest(mapping);
     test_since(mapping);
     test_region(mapping);

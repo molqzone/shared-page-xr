@@ -2,7 +2,7 @@
  * @file test_coherency.cpp
  * @brief `AccessWindow` 的意图到动作映射 / Intent-to-action mapping of `AccessWindow`.
  *
- * 这组测试不碰硬件：把一组记录型函数当作平台的 `CoherencePolicy`，检查页引擎在每个
+ * 这组测试不碰硬件：把一组记录型函数当作平台的 `Coherent` provider，检查页引擎在每个
  * 读写路径上到底请求了哪些维护、按什么顺序、覆盖哪些字节。它要钉住的三件事：
  *   1. 意图没有走样——写路径绝不请求 invalidate，读路径绝不请求 clean；
  *   2. 顺序正确——样本先于 `head` 可见，payload 先于 `seq` 可见；
@@ -12,10 +12,10 @@
  *   The channel table is no exception: announcing is EXCHANGE (sync in, publish out) and
  *   looking up is READ (invalidate only), with the caller never touching a cache op.
  *
- * 这条测试之所以可能，正是因为维护动作现在是注入的策略而不是产品代码里的手写调用：
+ * 这条测试之所以可能，正是因为维护动作现在是注入的 provider 而不是产品代码里的手写调用：
  * 在没有板子的主机上也能验证“维护不会被漏掉”。
  * These tests need no hardware: a recording set of functions plays the platform's
- * `CoherencePolicy`, and the page engine is checked for which maintenance it requests
+ * `Coherent` provider, and the page engine is checked for which maintenance it requests
  * on each path, in which order, over which bytes. The three properties pinned here:
  *   1. intent is preserved -- the write path never asks for invalidate, the read path
  *      never asks for clean;
@@ -24,7 +24,7 @@
  *   3. ranges are exact -- what is published is what the engine actually modified, not
  *      a whole page.
  *
- * This test exists at all because maintenance is now an injected policy rather than
+ * This test exists at all because maintenance is now an injected provider rather than
  * hand-written calls in product code: "it cannot be forgotten" is verifiable on a host.
  */
 
@@ -35,7 +35,7 @@
 #include "sample.hpp"
 #include "shared_page.hpp"
 // 自定义策略（记录型）不在库的显式实例化列表里，所以本 TU 自己实例化引擎。
-// The recording policy is not in the library's explicit-instantiation list, so this TU
+// The recording provider is not in the library's explicit-instantiation list, so this TU
 // instantiates the engine itself.
 #include "shared_page_impl.hpp"
 #include "test_assert.hpp"
@@ -95,7 +95,7 @@ void RecordRefresh(const void* address, size_t bytes)
 void RecordSync(void* address, size_t bytes) { RecordOne(Call::SYNC, address, bytes); }
 
 /// @brief 记录型策略：三个动作都记账，然后什么也不做。
-///        A recording policy: all three actions journal the call and do nothing else.
+///        A recording provider: all three actions journal the call and do nothing else.
 struct Recording
 {
   void Publish(void* address, size_t bytes) const { RecordPublish(address, bytes); }
@@ -104,7 +104,7 @@ struct Recording
 };
 
 /// @brief 用记录型策略实例化的页：维护动作在主机上可断言。
-///        The page instantiated with the recording policy: maintenance is assertable on
+///        The page instantiated with the recording provider: maintenance is assertable on
 ///        a host.
 using TestPage = LibXR::SharedPage<Format, Sample, TestPayload, 0, Recording>;
 
@@ -260,16 +260,17 @@ void test_recover_syncs_before_publishing()
   }
 }
 
-/// 5. 整页格式化是一个 WRITE 窗口：范围是整页，不是几个字。
-///    5. Formatting the page is one WRITE window over the whole page.
-void test_format_publishes_whole_page()
+/// 5. 整页格式化是一个 WRITE_SYNC 窗口：范围是整页，退出动作是 clean+invalidate。
+///    5. Formatting the page is one WRITE_SYNC window over the whole page: the exit
+///    action is clean+invalidate, so the page is proven to be in DRAM.
+void test_format_syncs_whole_page()
 {
   TestPage page(PageBase(), Recording{});
   g_count = 0;
 
   page.Format();
   TEST_ASSERT(g_count == 1);
-  TEST_ASSERT(g_log[0].call == Call::PUBLISH);
+  TEST_ASSERT(g_log[0].call == Call::SYNC);
   TEST_ASSERT(g_log[0].address == PageBase());
   TEST_ASSERT(g_log[0].bytes == Format::PAGE_SIZE);
 }
@@ -319,7 +320,7 @@ int main()
   test_read_never_publishes();
   test_region_write_order();
   test_recover_syncs_before_publishing();
-  test_format_publishes_whole_page();
+  test_format_syncs_whole_page();
   test_channel_table_windows();
   return 0;
 }

@@ -24,12 +24,12 @@
  *
  * 这个类也回答**它的一致性域是谁**：`uio` 的 `mmap` 在 `UIO_MEM_PHYS` 上强制
  * `pgprot_noncached`（`drivers/uio/uio.c`），字节直通内存，所以 `Coherence()` 是
- * `no_coherence()`，与 `/dev/mem` 的语义一致——只是不再需要 root 和宽权限的
+ * `NoCoherence{}`，与 `/dev/mem` 的语义一致——只是不再需要 root 和宽权限的
  * `/dev/mem`。
  *
  * This class also answers *which coherency domain it is*: `uio`'s `mmap` forces
  * `pgprot_noncached` for `UIO_MEM_PHYS` (`drivers/uio/uio.c`), so the bytes go straight
- * to memory and `Coherence()` is `no_coherence()` -- the same semantics as `/dev/mem`,
+ * to memory and `Coherence()` is `NoCoherence{}` -- the same semantics as `/dev/mem`,
  * without needing root and a wide-open `/dev/mem`.
  */
 
@@ -123,12 +123,12 @@ class UioMapping
   /// @brief 这个映射的一致性域：non-cacheable，没有对端需要维护。
   ///        The coherency domain: non-cacheable, no peer to maintain.
   ///
-  /// 返回的是**策略类型**（`NoCachePolicy`）：页的一致性域在编译期就定了，映射只是
+  /// 返回的是 **provider 类型**（`NoCoherence`）：页的一致性域在编译期就定了，映射只是
   /// 给出它是哪一个。`Page page(mapping.Data(), mapping.Coherence())` 因此零间接。
-  /// Returns the **policy type** (`NoCachePolicy`): a page's domain is fixed at compile
+  /// Returns the **provider type** (`NoCoherence`): a page's domain is fixed at compile
   /// time and the mapping only names it, so `Page page(mapping.Data(), mapping.Coherence())`
   /// costs no indirect call.
-  static NoCachePolicy Coherence() { return {}; }
+  static NoCoherence Coherence() { return {}; }
 
   /// @brief 底层映射基址（交给别的 mmap 包装持有，不额外 munmap）。
   ///        The mapping base, for another mmap view to hold (no extra munmap).

@@ -65,7 +65,7 @@
  *
  * 为什么是函数指针：这个仓是**中间件**，不是驱动层级。LibXR 里两种接缝分工明确——
  * 平台驱动往上实现虚基类（`src/driver/` 的 `UART`/`SPI`/`GPIO`），中间件从外部注入
- * 函数指针（`ReadPort::read_fun_`、本仓的 `CoherencePolicy`、`ValidateFn`）。页层属于
+ * 函数指针（`ReadPort::read_fun_`、本仓的 `Coherent` provider、`ValidateFn`）。页层属于
  * 后者：它不认识设备，只要求“被叫醒、回答、叫醒”，所以用注入的函数指针，而不是让页层
  * 继承一个驱动基类。
  *
@@ -76,7 +76,7 @@
  * Why function pointers: this repository is **middleware**, not the driver hierarchy.
  * LibXR splits the two seams cleanly -- platform drivers implement virtual bases
  * (`UART`/`SPI`/`GPIO` under `src/driver/`), middleware takes function pointers
- * injected from outside (`ReadPort::read_fun_`, this repo's `CoherencePolicy` and
+ * injected from outside (`ReadPort::read_fun_`, this repo's `Coherent` provider and
  * `ValidateFn`).  The page layer is the latter: it knows no device, it only asks to be
  * woken, to answer, and to wake -- so injected function pointers, not a driver base
  * class it would have to inherit.

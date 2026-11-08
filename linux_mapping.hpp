@@ -70,7 +70,7 @@ namespace LibXR
 /// 这三个函数都收一个 `root`（真机是 `/sys/class/uio`），测试给一棵假树就行。
 /// All three take a `root` (the real one is `/sys/class/uio`), so a test can hand them a
 /// fake tree.
-namespace uio
+namespace UIO
 {
 /// @brief 读一个 sysfs 属性并去掉行尾空白 / Read one sysfs attribute, trimming the end.
 inline std::string ReadAttribute(const std::string& path)
@@ -195,7 +195,7 @@ inline bool FindMapByName(const char* root, const char* device, const char* map_
   }
   return false;
 }
-}  // namespace uio
+}  // namespace UIO
 
 /** @brief 一个 uio 映射：按 sysfs 里的 uio 名字找到设备，再映射其中一段。
  *         One uio mapping: find the device by its sysfs name, then map one entry.
@@ -206,7 +206,7 @@ inline bool FindMapByName(const char* root, const char* device, const char* map_
  * process lifetime (no munmap, no close), and the object is a copyable view whose
  * `Data() == nullptr` marks a failed mapping.
  */
-class UioMapping
+class UIOMapping
 {
  public:
   /// @brief 按 uio 名字（`/sys/class/uio/uioN/name`）与 map 索引映射 `bytes` 字节。
@@ -215,9 +215,9 @@ class UioMapping
   /// 索引写死只适合"这段就是我要的"由设备树保证的场合；一页多段时用 `OpenNamed()`。
   /// A fixed index only suits a node whose layout the device tree guarantees; use
   /// `OpenNamed()` when one node carries several entries.
-  static UioMapping Open(const char* name, uint32_t map_index, size_t bytes)
+  static UIOMapping Open(const char* name, uint32_t map_index, size_t bytes)
   {
-    const std::string device = uio::FindDevice(kSysfsRoot, name);
+    const std::string device = UIO::FindDevice(kSysfsRoot, name);
     if (device.empty() || bytes == 0)
     {
       return {};
@@ -236,20 +236,20 @@ class UioMapping
   /// its entries does not turn into a silent read of the wrong page.  The node is
   /// opened `O_SYNC`: the peer polls this memory, so a write should already be in
   /// memory.
-  static UioMapping OpenNamed(const char* name, const char* map_name, uint32_t fallback_index,
+  static UIOMapping OpenNamed(const char* name, const char* map_name, uint32_t fallback_index,
                               size_t fallback_bytes)
   {
-    const std::string device = uio::FindDevice(kSysfsRoot, name);
+    const std::string device = UIO::FindDevice(kSysfsRoot, name);
     if (device.empty())
     {
       return {};
     }
-    uio::MapInfo info;
-    if (!uio::FindMapByName(kSysfsRoot, device.c_str(), map_name, &info))
+    UIO::MapInfo info;
+    if (!UIO::FindMapByName(kSysfsRoot, device.c_str(), map_name, &info))
     {
       info.index = fallback_index;
       size_t bytes = 0;
-      if (uio::ReadMapSize(kSysfsRoot, device.c_str(), fallback_index, &bytes))
+      if (UIO::ReadMapSize(kSysfsRoot, device.c_str(), fallback_index, &bytes))
       {
         info.bytes = bytes;
       }
@@ -262,7 +262,7 @@ class UioMapping
     return Bind(device, info.index, bytes, O_SYNC);
   }
 
-  UioMapping() = default;
+  UIOMapping() = default;
 
   [[nodiscard]] uint8_t* Data() const { return data_; }
   [[nodiscard]] size_t Size() const { return size_; }
@@ -291,10 +291,10 @@ class UioMapping
 
   /// @brief 打开 `/dev/<device>` 并映射第 `map_index` 段。
   ///        Open `/dev/<device>` and map entry `map_index`.
-  static UioMapping Bind(const std::string& device, uint32_t map_index, size_t bytes,
+  static UIOMapping Bind(const std::string& device, uint32_t map_index, size_t bytes,
                          int extra_flags)
   {
-    UioMapping mapping;
+    UIOMapping mapping;
     const int64_t page = ::sysconf(_SC_PAGESIZE);
     if (page <= 0)
     {

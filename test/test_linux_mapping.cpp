@@ -87,14 +87,14 @@ void TestDeviceLookup()
 
   // 名字匹配的是 sysfs 的 `name`，不是目录序号：uio1 才是我们的节点。
   // Match on the sysfs `name`, not on the directory number: uio1 is the one.
-  TEST_ASSERT(LibXR::uio::FindDevice(tree.root.c_str(), "guidance-pages") == "uio1");
-  TEST_ASSERT(LibXR::uio::FindDevice(tree.root.c_str(), "some-other-node") == "uio0");
-  TEST_ASSERT(LibXR::uio::FindDevice(tree.root.c_str(), "absent").empty());
+  TEST_ASSERT(LibXR::UIO::FindDevice(tree.root.c_str(), "guidance-pages") == "uio1");
+  TEST_ASSERT(LibXR::UIO::FindDevice(tree.root.c_str(), "some-other-node") == "uio0");
+  TEST_ASSERT(LibXR::UIO::FindDevice(tree.root.c_str(), "absent").empty());
 
   // 空 root 与空名字都只是"没找到"，不崩、不读别的设备。
   // An empty root or name is just "not found": no crash, no reading another device.
-  TEST_ASSERT(LibXR::uio::FindDevice(nullptr, "guidance-pages").empty());
-  TEST_ASSERT(LibXR::uio::FindDevice(tree.root.c_str(), nullptr).empty());
+  TEST_ASSERT(LibXR::UIO::FindDevice(nullptr, "guidance-pages").empty());
+  TEST_ASSERT(LibXR::UIO::FindDevice(tree.root.c_str(), nullptr).empty());
 }
 
 void TestMapSelection()
@@ -102,21 +102,21 @@ void TestMapSelection()
   FakeUio tree;
   BuildMachineTree(&tree);
 
-  LibXR::uio::MapInfo info;
-  TEST_ASSERT(LibXR::uio::FindMapByName(tree.root.c_str(), "uio1", "shared", &info));
+  LibXR::UIO::MapInfo info;
+  TEST_ASSERT(LibXR::UIO::FindMapByName(tree.root.c_str(), "uio1", "shared", &info));
   // 索引与字节数都来自 sysfs，不是写死的 1 和 4096。
   // Both the index and the size come from sysfs, not from a hard-coded 1 and 4096.
   TEST_ASSERT(info.index == 1);
   TEST_ASSERT(info.bytes == 4096);
 
-  TEST_ASSERT(LibXR::uio::FindMapByName(tree.root.c_str(), "uio1", "console", &info));
+  TEST_ASSERT(LibXR::UIO::FindMapByName(tree.root.c_str(), "uio1", "console", &info));
   TEST_ASSERT(info.index == 0);
   TEST_ASSERT(info.bytes == 8192);
 
   // 名字不存在时 false，不能退化成"随便给一个".
   // An unknown name is false; it never degrades to "some map will do".
-  TEST_ASSERT(!LibXR::uio::FindMapByName(tree.root.c_str(), "uio1", "absent", &info));
-  TEST_ASSERT(!LibXR::uio::FindMapByName(tree.root.c_str(), "uio9", "shared", &info));
+  TEST_ASSERT(!LibXR::UIO::FindMapByName(tree.root.c_str(), "uio1", "absent", &info));
+  TEST_ASSERT(!LibXR::UIO::FindMapByName(tree.root.c_str(), "uio9", "shared", &info));
 }
 
 void TestSizeAndTrim()
@@ -130,16 +130,16 @@ void TestSizeAndTrim()
   tree.Write("uio1/maps/map2/size", " 1024 \n");
 
   size_t bytes = 0;
-  TEST_ASSERT(LibXR::uio::ReadMapSize(tree.root.c_str(), "uio1", 1, &bytes));
+  TEST_ASSERT(LibXR::UIO::ReadMapSize(tree.root.c_str(), "uio1", 1, &bytes));
   TEST_ASSERT(bytes == 4096);
-  TEST_ASSERT(LibXR::uio::ReadMapSize(tree.root.c_str(), "uio1", 2, &bytes));
+  TEST_ASSERT(LibXR::UIO::ReadMapSize(tree.root.c_str(), "uio1", 2, &bytes));
   TEST_ASSERT(bytes == 1024);
-  TEST_ASSERT(!LibXR::uio::ReadMapSize(tree.root.c_str(), "uio1", 9, &bytes));
+  TEST_ASSERT(!LibXR::UIO::ReadMapSize(tree.root.c_str(), "uio1", 9, &bytes));
 
   // 前导空格不参与匹配（sysfs 不会有，但读进来的字符串也不该被它骗）。
   // Leading spaces do not take part in matching (sysfs never has them, but the string
   // that comes back should not be fooled either).
-  TEST_ASSERT(LibXR::uio::ReadAttribute(std::string(tree.root) + "/uio1/maps/map2/name")
+  TEST_ASSERT(LibXR::UIO::ReadAttribute(std::string(tree.root) + "/uio1/maps/map2/name")
                   .find("spaced") != std::string::npos);
 }
 
@@ -147,12 +147,12 @@ void TestOpenRejectsBadInput()
 {
   // 没有设备名或没有长度，就不该尝试 open `/dev/` 下的任何东西。
   // Without a device name or a length, nothing under `/dev/` is opened.
-  TEST_ASSERT(!LibXR::UioMapping::Open(nullptr, 0, 4096));
-  TEST_ASSERT(!LibXR::UioMapping::Open("no-such-uio-device", 1, 4096));
-  TEST_ASSERT(!LibXR::UioMapping::Open("no-such-uio-device", 1, 0));
-  TEST_ASSERT(!LibXR::UioMapping::OpenNamed(nullptr, "shared", 1, 4096));
-  TEST_ASSERT(!LibXR::UioMapping::OpenNamed("no-such-uio-device", "shared", 1, 4096));
-  TEST_ASSERT(!LibXR::UioMapping::OpenNamed("no-such-uio-device", "shared", 1, 0));
+  TEST_ASSERT(!LibXR::UIOMapping::Open(nullptr, 0, 4096));
+  TEST_ASSERT(!LibXR::UIOMapping::Open("no-such-uio-device", 1, 4096));
+  TEST_ASSERT(!LibXR::UIOMapping::Open("no-such-uio-device", 1, 0));
+  TEST_ASSERT(!LibXR::UIOMapping::OpenNamed(nullptr, "shared", 1, 4096));
+  TEST_ASSERT(!LibXR::UIOMapping::OpenNamed("no-such-uio-device", "shared", 1, 4096));
+  TEST_ASSERT(!LibXR::UIOMapping::OpenNamed("no-such-uio-device", "shared", 1, 0));
 }
 
 }  // namespace

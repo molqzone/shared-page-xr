@@ -28,12 +28,8 @@ channel table                 页布局的一部分（`ChannelTable<CAPACITY>` /
                               名字 → 端点的通告与发现，代次语义，维护由页绑定的 provider 负责
 command_channel.hpp           命令方向（header-only）：Doorbell（通知+回执，注入）
                                + CommandChannel<F, T, P, TAG, Policy>：等、读、校验、去重、回执
-linux_mapping.hpp             Linux 绑定：UioMapping（按 sysfs 名找 /dev/uioN，按 map
-                               索引 mmap）+ 该映射的一致性域（pgprot_noncached →
-                               NoCoherence）。只有 Linux 消费者显式 include 才进入
-                               编译，中立核心不引用它
 CMakeLists.txt                STATIC target shared_page_xr，只编 shared_page.cpp，链接 libxr；
-                               doorbell / command_channel / linux_mapping 是 header-only，
+                               doorbell / command_channel 是 header-only，
                                不触平台 UAPI，任何平台可编译
 ```
 
@@ -48,8 +44,13 @@ CMakeLists.txt                STATIC target shared_page_xr，只编 shared_page.
 轮询一旦存在就会因为“方便”变成实际使用的那条。周期代码只许看状态（`Head()` 的时鲜），
 不许过手数据。
 
-本库不接触任何平台 UAPI——页指针是注入的：Linux 侧的 UIO 绑定在 `linux_mapping.hpp`，
-由消费者自行 include；其他平台给链接脚本符号或静态缓冲即可。
+本库不接触任何平台 UAPI——页指针是注入的：把页映射进来是消费方自己的事（Linux 侧
+目前是 Python 的 `cop`，按 `map 0` = console、`map 1` = 共享页 去 mmap `/dev/uioN`；
+`uio` 的 `mmap` 在 `UIO_MEM_PHYS` 上强制 `pgprot_noncached`，所以那一侧的一致性域是
+`NoCoherence`）。其他平台给链接脚本符号或静态缓冲即可。原先的 `UioMapping` 因为没有
+消费者已删除：它只被自己的编译检查 include 过，而同一套映射语义已经在镜像仓的
+`docs/uio-bringup-handoff.md` 里由 `cop` 在真机上跑通过。第一个 C++ 消费者出现时，
+按那时的形状重写，不要先写再找用户。
 
 原先的宿主适配器（等 `LibXR::Semaphore` → drain → publish）已删除：它的唯一消费者是
 自己的测试，而且它不认识帧布局，会把未校验的样本 publish 出去。等真的出现第二个消费者、
@@ -102,8 +103,7 @@ Command command = {};
 if (page.Region().Read(&command, &seq) == ErrorCode::OK) { /* 用 command */ }
 
 // 消费侧（Linux / 另一核）：页指针与一致性域都是构造参数
-auto mapping = LibXR::UioMapping::Open("guidance-pages", 1, 4096);  // Linux 绑定
-Page page(mapping.Data(), mapping.Coherence());  // 域由映射给出，必须给
+Page page(/* 消费方映射进来的页基址 */, LibXR::NoCoherence{});  // 域必须给
 uint32_t seen = page.TelemetryReader().Head();   // 从当前 head 起，只跟新样本
 LibXR::SinceResult since{};
 for (;;) {
@@ -207,8 +207,8 @@ provider 是 `SharedPage` 的模板参数：没有“省略即不维护”的路
 * **契约无独立版本号字段**：页头自描述 + 产品 `TAG` 承担互验，变更双端同步。加字段永远
   是廉价操作，改已有字段偏移不是——改了就必须递增 `TAG` 并同步另一侧；改帧几何就换
   `Format` traits。
-* 页地址以指针注入，不进契约：Linux 侧由平台映射后传入（参考绑定
-  `linux_mapping.hpp` 按名字找 `/dev/uioN`），C906L 侧由链接脚本分配的符号传入
+* 页地址以指针注入，不进契约：Linux 侧由消费方自己映射后传入（`/dev/uioN` 的
+  `map 1`，见镜像仓的 `docs/uio-bringup-handoff.md`），C906L 侧由链接脚本分配的符号传入
   （平台内存图数据，见 sophgo-sg200x-debian 的 `memmap.py`：页在 `fast_image` 这块
   保留区的尾部）。
 * `SharedPage` 继承 LibXR `Topic`：页本身就能当 topic 发布出去，等事件、drain、发布

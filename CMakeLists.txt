@@ -17,13 +17,15 @@ endif()
 # STATIC target, matching the LibXR default: implementations live in the .cpp files and
 # the headers hold only the contract and the declarations.
 #
-# 平台绑定全部 header-only，且不接触任何平台 UAPI：`linux_mapping.hpp`（UIO 映射与
-# 它的 NC 一致性域）只有 Linux 消费者显式 include 时才进入编译；中立的页引擎与
-# `doorbell.hpp` / `command_channel.hpp` 在任何平台都能编。
-# Every platform binding is header-only and touches no platform UAPI: `linux_mapping.hpp`
-# (the UIO mapping and its NC coherency domain) enters compilation only where a Linux
-# consumer includes it, while the neutral page engine plus `doorbell.hpp` /
-# `command_channel.hpp` compile anywhere.
+# 接缝全部 header-only，且不接触任何平台 UAPI：页引擎与 `doorbell.hpp` /
+# `command_channel.hpp` 在任何平台都能编。**平台映射不在这里**：把页映射进来是消费方
+# 的事（Linux 侧目前是 Python 的 `cop`，走 `/dev/uioN` 的两个 map），本库只收一个页
+# 指针和一个一致性 provider。原先的 `UioMapping` 没有消费者，已删除。
+# Every seam is header-only and touches no platform UAPI: the page engine plus
+# `doorbell.hpp` / `command_channel.hpp` compile anywhere.  **The platform mapping is
+# not here**: mapping the page in is the consumer's job (on Linux it is `cop`, in
+# Python, over the two `/dev/uioN` maps), and this library takes only a page pointer and
+# a coherency provider.  The former `UioMapping` had no consumer and was deleted.
 if(NOT TARGET shared_page_xr)
   add_library(shared_page_xr STATIC shared_page.cpp)
   target_include_directories(shared_page_xr PUBLIC ${CMAKE_CURRENT_LIST_DIR})

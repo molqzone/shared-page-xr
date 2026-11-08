@@ -70,12 +70,12 @@ static_assert(sizeof(TestProtocolPayload) == 24);
 static_assert(sizeof(TestProtocolPayload) % sizeof(uint32_t) == 0);
 
 using TestFormat = LibXRTest::Format;
-using TestPage = SharedPage<TestFormat, Sample, TestProtocolPayload, 0, NoCachePolicy>;
+using TestPage = SharedPage<TestFormat, Sample, TestProtocolPayload, 0, NoCoherence>;
 
 /// 另一份契约：同类型、不同 TAG，用来伪造双端 wire 版本漂移。
 /// Another contract: same types, a different TAG, to forge wire version drift.
 using TaggedPage =
-    SharedPage<TestFormat, Sample, TestProtocolPayload, 0x54414731U, NoCachePolicy>;
+    SharedPage<TestFormat, Sample, TestProtocolPayload, 0x54414731U, NoCoherence>;
 
 /// 再一份契约：payload 尺寸不同。
 /// Yet another contract: a different payload size.
@@ -83,7 +83,7 @@ struct SmallPayload
 {
   uint8_t bytes[16] = {};
 };
-using SmallPage = SharedPage<TestFormat, Sample, SmallPayload, 0, NoCachePolicy>;
+using SmallPage = SharedPage<TestFormat, Sample, SmallPayload, 0, NoCoherence>;
 
 /// 再一份契约：帧几何不同（4096B / 64 槽，本测试自定）——页头必须把这种漂移报出来。
 /// 本库不带任何 SoC 的默认几何，所以这份几何也只能由测试自己声明。
@@ -96,7 +96,7 @@ struct WideFormat
   static constexpr size_t PAGE_SIZE = 4096;
   static constexpr uint32_t SLOT_COUNT = 64;
 };
-using WidePage = SharedPage<WideFormat, Sample, TestProtocolPayload, 0, NoCachePolicy>;
+using WidePage = SharedPage<WideFormat, Sample, TestProtocolPayload, 0, NoCoherence>;
 
 /// 读出一个结构体占用的字节，用于伪造外来页。Read a struct's bytes to forge a page.
 template <typename T>
@@ -207,7 +207,7 @@ void test_unbound_page()
 /// 2. 冷页、Format() 与发布索引。Cold page, Format(), and the publish index.
 void test_cold_page_and_index(const Mapping& mapping)
 {
-  TestPage page(mapping.Data(), LibXR::no_coherence());
+  TestPage page(mapping.Data(), LibXR::NoCoherence{});
   TEST_ASSERT(page.Check() == PageMagicStatus::UNFORMATTED);
   TEST_ASSERT(!page.Ready());
 
@@ -263,7 +263,7 @@ void test_foreign_page(const Mapping& mapping)
                               .tag = 0};
   std::memcpy(mapping.Data(), bytes_of(foreign).data(), sizeof(foreign));
 
-  TestPage page(mapping.Data(), LibXR::no_coherence());
+  TestPage page(mapping.Data(), LibXR::NoCoherence{});
   TEST_ASSERT(page.Check() == PageMagicStatus::FOREIGN);
 
   page.Format();
@@ -275,28 +275,28 @@ void test_foreign_page(const Mapping& mapping)
 ///    tag, must be reported as MISMATCH instead of silently misread.
 void test_mismatch_page(const Mapping& mapping)
 {
-  TestPage page(mapping.Data(), LibXR::no_coherence());
+  TestPage page(mapping.Data(), LibXR::NoCoherence{});
   page.Format();
   TEST_ASSERT(page.Check() == PageMagicStatus::FORMATTED);
 
-  const TaggedPage drifted(mapping.Data(), LibXR::no_coherence());
+  const TaggedPage drifted(mapping.Data(), LibXR::NoCoherence{});
   TEST_ASSERT(drifted.Check() == PageMagicStatus::MISMATCH);
   TEST_ASSERT(!drifted.Ready());
   TEST_ASSERT(drifted.TelemetryReader().Head() == 0);
 
-  const SmallPage resized(mapping.Data(), LibXR::no_coherence());
+  const SmallPage resized(mapping.Data(), LibXR::NoCoherence{});
   TEST_ASSERT(resized.Check() == PageMagicStatus::MISMATCH);
 
   // 帧几何漂移同样必须报出来：页头记录几何，不依赖库常量。
   // Frame geometry drift must be reported too: the header records the geometry, no
   // library constants involved.
-  const WidePage regeometried(mapping.Data(), LibXR::no_coherence());
+  const WidePage regeometried(mapping.Data(), LibXR::NoCoherence{});
   TEST_ASSERT(regeometried.Check() == PageMagicStatus::MISMATCH);
 
   // 与外来页不同：MISMATCH 页可以被这一侧的 Format() 重新认领。
   // Unlike a foreign page: a mismatched page can be reclaimed by this side's
   // Format().
-  TaggedPage reclaim(mapping.Data(), LibXR::no_coherence());
+  TaggedPage reclaim(mapping.Data(), LibXR::NoCoherence{});
   reclaim.Format();
   TEST_ASSERT(reclaim.Check() == PageMagicStatus::FORMATTED);
   TEST_ASSERT(page.Check() == PageMagicStatus::MISMATCH);
@@ -313,7 +313,7 @@ void test_initialize(const Mapping& mapping)
   // The previous test left a different geometry on the page; clear it back to
   // cold first.
   std::memset(mapping.Data(), 0, TestFormat::PAGE_SIZE);
-  TestPage page(mapping.Data(), LibXR::no_coherence());
+  TestPage page(mapping.Data(), LibXR::NoCoherence{});
   TEST_ASSERT(page.Check() == PageMagicStatus::UNFORMATTED);
   TEST_ASSERT(page.Initialize() == PageMagicStatus::FORMATTED);
   TEST_ASSERT(page.Ready());
@@ -331,7 +331,7 @@ void test_initialize(const Mapping& mapping)
   // 几何漂移：Initialize() 拒绝建页，页头保持原样（探针不能被抹掉）。
   // Geometry drift: Initialize() refuses to build and leaves the header as it
   // was -- the probe must not be erased.
-  TaggedPage drifted(mapping.Data(), LibXR::no_coherence());
+  TaggedPage drifted(mapping.Data(), LibXR::NoCoherence{});
   TEST_ASSERT(drifted.Initialize() == PageMagicStatus::MISMATCH);
   TEST_ASSERT(drifted.Check() == PageMagicStatus::MISMATCH);
   TEST_ASSERT(drifted.TelemetryReader().Head() == head);
@@ -348,7 +348,7 @@ void test_initialize(const Mapping& mapping)
                               .region_offset = 0,
                               .tag = 0};
   std::memcpy(mapping.Data(), bytes_of(foreign).data(), sizeof(foreign));
-  TestPage foreign_page(mapping.Data(), LibXR::no_coherence());
+  TestPage foreign_page(mapping.Data(), LibXR::NoCoherence{});
   TEST_ASSERT(foreign_page.Initialize() == PageMagicStatus::FOREIGN);
   TEST_ASSERT(foreign_page.Check() == PageMagicStatus::FOREIGN);
 }
@@ -356,7 +356,7 @@ void test_initialize(const Mapping& mapping)
 /// 5. 发布索引与最新采样。Publish index and the latest sample.
 void test_latest(const Mapping& mapping)
 {
-  TestPage page(mapping.Data(), LibXR::no_coherence());
+  TestPage page(mapping.Data(), LibXR::NoCoherence{});
   for (uint32_t index = 0; index < 3; ++index)
   {
     TEST_ASSERT(page.TelemetryWriter().Write(make_sample(index)) == index + 1);
@@ -382,7 +382,7 @@ void test_latest(const Mapping& mapping)
 /// 6. `Since()` 的区间、上界与 gap。Range, bound and gap of `Since()`.
 void test_since(const Mapping& mapping)
 {
-  TestPage page(mapping.Data(), LibXR::no_coherence());
+  TestPage page(mapping.Data(), LibXR::NoCoherence{});
   page.ClearHistory();
   auto writer = page.TelemetryWriter();
   const auto reader = page.TelemetryReader();
@@ -491,7 +491,7 @@ void test_since(const Mapping& mapping)
 ///    Stable region reads, the retry budget and the BUSY verdict.
 void test_region(const Mapping& mapping)
 {
-  TestPage page(mapping.Data(), LibXR::no_coherence());
+  TestPage page(mapping.Data(), LibXR::NoCoherence{});
   page.ClearHistory();
   auto reference = page.Region();
 
@@ -563,7 +563,7 @@ void test_region(const Mapping& mapping)
 ///    claims and the history survives.
 void test_stale_claims(const Mapping& mapping)
 {
-  TestPage page(mapping.Data(), LibXR::no_coherence());
+  TestPage page(mapping.Data(), LibXR::NoCoherence{});
   page.ClearHistory();
   auto writer = page.TelemetryWriter();
   writer.Write(make_sample(0));
@@ -612,7 +612,7 @@ void test_stale_claims(const Mapping& mapping)
 /// Channel table: layout offset, announcement, generation and lookup by name.
 void test_channel_table(const Mapping& mapping)
 {
-  TestPage page(mapping.Data(), no_coherence());
+  TestPage page(mapping.Data(), LibXR::NoCoherence{});
   page.Format();
 
   constexpr PageLayout layout = TestPage::Layout();

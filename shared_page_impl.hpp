@@ -1,8 +1,8 @@
-// 本文件是**私有实现头**：模板化的页引擎定义。`shared_page.cpp` 为内置策略显式
-// 实例化，消费方要用自己的策略类型时 include 它（例如固件的 C906 策略）。
+// 本文件是**私有实现头**：模板化的页引擎定义。`shared_page.cpp` 为内置 provider 显式
+// 实例化，消费方要用自己的 provider 类型时 include 它（例如固件的 T-Head CMO provider）。
 // A private implementation header: the templated page engine.  `shared_page.cpp`
-// explicitly instantiates the built-in policies; a consumer that supplies its own
-// policy type includes this file (the firmware's C906 policy does).
+// explicitly instantiates the built-in providers; a consumer that supplies its own
+// provider type includes this file (the firmware's T-Head CMO provider does).
 #pragma once
 
 #include "shared_page.hpp"
@@ -42,10 +42,10 @@ inline void AtomicCopyWords(void* destination, const void* source, size_t bytes)
 }
 }  // namespace detail
 
-template <CoherencePolicyType Policy>
-TelemetryCore<Policy>::TelemetryCore(void* addr, const PageLayout& layout,
-                             const Policy& coherence)
-    : coherence_(coherence)
+template <Coherent Provider>
+TelemetryCore<Provider>::TelemetryCore(void* addr, const PageLayout& layout,
+                             const Provider& provider)
+    : provider_(provider)
 {
   if (addr == nullptr)
   {
@@ -62,8 +62,8 @@ TelemetryCore<Policy>::TelemetryCore(void* addr, const PageLayout& layout,
   slots_ = layout.slot_count;
 }
 
-template <CoherencePolicyType Policy>
-uint32_t TelemetryCore<Policy>::Write(const void* sample)
+template <Coherent Provider>
+uint32_t TelemetryCore<Provider>::Write(const void* sample)
 {
   if (sample == nullptr || head_ == nullptr || state_ == nullptr || ring_ == nullptr)
   {
@@ -75,7 +75,7 @@ uint32_t TelemetryCore<Policy>::Write(const void* sample)
   // head_ and state_ are adjacent (one cache line): one EXCHANGE window covers the
   // read-modify-write of both -- stale lines dropped on entry, the new head and the
   // cleared claim pushed back together on exit.
-  AccessWindow<Policy> counters(coherence_, head_, 2 * sizeof(uint32_t), AccessIntent::EXCHANGE);
+  AccessWindow<Provider> counters(provider_, head_, 2 * sizeof(uint32_t), AccessIntent::EXCHANGE);
 
   uint32_t expected = 0;
   if (!state_->compare_exchange_strong(expected, 1, std::memory_order_acquire,
@@ -90,7 +90,7 @@ uint32_t TelemetryCore<Policy>::Write(const void* sample)
     // 样本必须先于 head 对读者可见：槽位窗口先关闭（clean），再写 head。
     // The sample must reach the reader before head advances: the slot window
     // closes (clean) before head is written.
-    AccessWindow<Policy> sample_window(coherence_, slot, stride_, AccessIntent::WRITE);
+    AccessWindow<Provider> sample_window(provider_, slot, stride_, AccessIntent::WRITE);
     detail::AtomicCopyWords(slot, sample, stride_);
   }
   head_->store(head + 1, std::memory_order_release);
@@ -98,19 +98,19 @@ uint32_t TelemetryCore<Policy>::Write(const void* sample)
   return head + 1;
 }
 
-template <CoherencePolicyType Policy>
-uint32_t TelemetryCore<Policy>::Head() const
+template <Coherent Provider>
+uint32_t TelemetryCore<Provider>::Head() const
 {
   if (head_ == nullptr)
   {
     return 0;
   }
-  AccessWindow<Policy> read(coherence_, head_, sizeof(uint32_t), AccessIntent::READ);
+  AccessWindow<Provider> read(provider_, head_, sizeof(uint32_t), AccessIntent::READ);
   return head_->load(std::memory_order_acquire);
 }
 
-template <CoherencePolicyType Policy>
-bool TelemetryCore<Policy>::Latest(void* out) const
+template <Coherent Provider>
+bool TelemetryCore<Provider>::Latest(void* out) const
 {
   if (out == nullptr || head_ == nullptr || state_ == nullptr || ring_ == nullptr)
   {
@@ -121,7 +121,7 @@ bool TelemetryCore<Policy>::Latest(void* out) const
   {
     uint32_t head = 0;
     {
-      AccessWindow<Policy> counters(coherence_, head_, 2 * sizeof(uint32_t),
+      AccessWindow<Provider> counters(provider_, head_, 2 * sizeof(uint32_t),
                             AccessIntent::READ);
       if (state_->load(std::memory_order_acquire) != 0)
       {
@@ -136,7 +136,7 @@ bool TelemetryCore<Policy>::Latest(void* out) const
 
     const uint8_t* slot = ring_ + static_cast<size_t>((head - 1) % slots_) * stride_;
     {
-      AccessWindow<Policy> sample_window(coherence_, slot, stride_, AccessIntent::READ);
+      AccessWindow<Provider> sample_window(provider_, slot, stride_, AccessIntent::READ);
       detail::AtomicCopyWords(out, slot, stride_);
     }
 
@@ -145,7 +145,7 @@ bool TelemetryCore<Policy>::Latest(void* out) const
     // Reopen a read window before re-reading head (drop stale lines again): a stale
     // line of our own would otherwise make a concurrent publish look like "nothing
     // changed".
-    AccessWindow<Policy> counters(coherence_, head_, 2 * sizeof(uint32_t), AccessIntent::READ);
+    AccessWindow<Provider> counters(provider_, head_, 2 * sizeof(uint32_t), AccessIntent::READ);
     const uint32_t after = head_->load(std::memory_order_acquire);
     if (after == head && state_->load(std::memory_order_acquire) == 0)
     {
@@ -156,8 +156,8 @@ bool TelemetryCore<Policy>::Latest(void* out) const
   return false;
 }
 
-template <CoherencePolicyType Policy>
-ErrorCode TelemetryCore<Policy>::Since(uint32_t last_seen, void* out, uint32_t capacity,
+template <Coherent Provider>
+ErrorCode TelemetryCore<Provider>::Since(uint32_t last_seen, void* out, uint32_t capacity,
                                SinceResult* result) const
 {
   if (result == nullptr)
@@ -175,7 +175,7 @@ ErrorCode TelemetryCore<Policy>::Since(uint32_t last_seen, void* out, uint32_t c
   {
     uint32_t head = 0;
     {
-      AccessWindow<Policy> counters(coherence_, head_, 2 * sizeof(uint32_t),
+      AccessWindow<Provider> counters(provider_, head_, 2 * sizeof(uint32_t),
                             AccessIntent::READ);
       if (state_->load(std::memory_order_acquire) != 0)
       {
@@ -192,7 +192,7 @@ ErrorCode TelemetryCore<Policy>::Since(uint32_t last_seen, void* out, uint32_t c
     const uint32_t count = head - last_seen;
     if (count > slots_)
     {
-      AccessWindow<Policy> counters(coherence_, head_, 2 * sizeof(uint32_t),
+      AccessWindow<Provider> counters(provider_, head_, 2 * sizeof(uint32_t),
                             AccessIntent::READ);
       const uint32_t after = head_->load(std::memory_order_acquire);
       if (after != head || state_->load(std::memory_order_acquire) != 0)
@@ -212,7 +212,7 @@ ErrorCode TelemetryCore<Policy>::Since(uint32_t last_seen, void* out, uint32_t c
       {
         const uint8_t* slot =
             ring_ + static_cast<size_t>((head - 1 - index) % slots_) * stride_;
-        AccessWindow<Policy> sample_window(coherence_, slot, stride_, AccessIntent::READ);
+        AccessWindow<Provider> sample_window(provider_, slot, stride_, AccessIntent::READ);
         detail::AtomicCopyWords(samples + static_cast<size_t>(index) * stride_, slot, stride_);
       }
       for (uint32_t first = 0, last = written == 0 ? 0 : written - 1; first < last;
@@ -227,7 +227,7 @@ ErrorCode TelemetryCore<Policy>::Since(uint32_t last_seen, void* out, uint32_t c
     }
 
     {
-      AccessWindow<Policy> counters(coherence_, head_, 2 * sizeof(uint32_t),
+      AccessWindow<Provider> counters(provider_, head_, 2 * sizeof(uint32_t),
                             AccessIntent::READ);
       if (head_->load(std::memory_order_acquire) != head ||
           state_->load(std::memory_order_acquire) != 0)
@@ -246,10 +246,10 @@ ErrorCode TelemetryCore<Policy>::Since(uint32_t last_seen, void* out, uint32_t c
   return ErrorCode::BUSY;
 }
 
-template <CoherencePolicyType Policy>
-ReferenceCore<Policy>::ReferenceCore(void* addr, const PageLayout& layout,
-                             const Policy& coherence)
-    : coherence_(coherence)
+template <Coherent Provider>
+ReferenceCore<Provider>::ReferenceCore(void* addr, const PageLayout& layout,
+                             const Provider& provider)
+    : provider_(provider)
 {
   if (addr == nullptr)
   {
@@ -263,8 +263,8 @@ ReferenceCore<Policy>::ReferenceCore(void* addr, const PageLayout& layout,
   payload_size_ = layout.payload_size;
 }
 
-template <CoherencePolicyType Policy>
-ErrorCode ReferenceCore<Policy>::Read(void* out, uint32_t* seq, uint32_t retries) const
+template <Coherent Provider>
+ErrorCode ReferenceCore<Provider>::Read(void* out, uint32_t* seq, uint32_t retries) const
 {
   if (out == nullptr || payload_ == nullptr || state_ == nullptr || seq_ == nullptr)
   {
@@ -277,7 +277,7 @@ ErrorCode ReferenceCore<Policy>::Read(void* out, uint32_t* seq, uint32_t retries
     // state_ and seq_ are adjacent (one cache line): one read window covers both.
     uint32_t before = 0;
     {
-      AccessWindow<Policy> counters(coherence_, state_, 2 * sizeof(uint32_t),
+      AccessWindow<Provider> counters(provider_, state_, 2 * sizeof(uint32_t),
                             AccessIntent::READ);
       if (state_->load(std::memory_order_acquire) != 0)
       {
@@ -287,7 +287,7 @@ ErrorCode ReferenceCore<Policy>::Read(void* out, uint32_t* seq, uint32_t retries
     }
 
     {
-      AccessWindow<Policy> payload_window(coherence_, payload_, payload_size_,
+      AccessWindow<Provider> payload_window(provider_, payload_, payload_size_,
                                   AccessIntent::READ);
       detail::AtomicCopyWords(out, payload_, payload_size_);
     }
@@ -295,7 +295,7 @@ ErrorCode ReferenceCore<Policy>::Read(void* out, uint32_t* seq, uint32_t retries
     // 复核 seq 之前重开读窗口，理由同遥测读路径。
     // Reopen a read window before re-reading seq, for the same reason as the
     // telemetry read path.
-    AccessWindow<Policy> counters(coherence_, state_, 2 * sizeof(uint32_t), AccessIntent::READ);
+    AccessWindow<Provider> counters(provider_, state_, 2 * sizeof(uint32_t), AccessIntent::READ);
     const uint32_t after = seq_->load(std::memory_order_acquire);
     if (before == after && state_->load(std::memory_order_acquire) == 0)
     {
@@ -310,8 +310,8 @@ ErrorCode ReferenceCore<Policy>::Read(void* out, uint32_t* seq, uint32_t retries
   return ErrorCode::BUSY;
 }
 
-template <CoherencePolicyType Policy>
-uint32_t ReferenceCore<Policy>::Write(const void* payload)
+template <Coherent Provider>
+uint32_t ReferenceCore<Provider>::Write(const void* payload)
 {
   if (payload_ == nullptr || state_ == nullptr || seq_ == nullptr || payload == nullptr)
   {
@@ -323,7 +323,7 @@ uint32_t ReferenceCore<Policy>::Write(const void* payload)
   // The claim is a read-modify-write over a possibly stale copy: EXCHANGE
   // clean+invalidates on entry and pushes the new seq plus the released claim back
   // on exit.
-  AccessWindow<Policy> counters(coherence_, state_, 2 * sizeof(uint32_t),
+  AccessWindow<Provider> counters(provider_, state_, 2 * sizeof(uint32_t),
                         AccessIntent::EXCHANGE);
   uint32_t expected = 0;
   if (!state_->compare_exchange_strong(expected, 1, std::memory_order_acquire,
@@ -337,7 +337,7 @@ uint32_t ReferenceCore<Policy>::Write(const void* payload)
     // payload 先于 seq 对读者可见：payload 窗口先关闭（clean），再写 seq。
     // The payload must reach the reader before seq advances: the payload window
     // closes (clean) before seq is written.
-    AccessWindow<Policy> payload_window(coherence_, payload_, payload_size_,
+    AccessWindow<Provider> payload_window(provider_, payload_, payload_size_,
                                 AccessIntent::WRITE);
     detail::AtomicCopyWords(payload_, payload, payload_size_);
   }
@@ -346,35 +346,35 @@ uint32_t ReferenceCore<Policy>::Write(const void* payload)
   return next;
 }
 
-template <CoherencePolicyType Policy>
-uint32_t ReferenceCore<Policy>::Seq() const
+template <Coherent Provider>
+uint32_t ReferenceCore<Provider>::Seq() const
 {
   if (seq_ == nullptr)
   {
     return 0;
   }
-  AccessWindow<Policy> read(coherence_, seq_, sizeof(uint32_t), AccessIntent::READ);
+  AccessWindow<Provider> read(provider_, seq_, sizeof(uint32_t), AccessIntent::READ);
   return seq_->load(std::memory_order_acquire);
 }
 
-template <CoherencePolicyType Policy>
-const void* ReferenceCore<Policy>::Raw() const { return payload_; }
+template <Coherent Provider>
+const void* ReferenceCore<Provider>::Raw() const { return payload_; }
 
-template <CoherencePolicyType Policy>
-PageCore<Policy>::PageCore(void* addr, const PageLayout& layout,
-                   const Policy& coherence)
-    : page_(static_cast<uint8_t*>(addr)), layout_(layout), coherence_(coherence)
+template <Coherent Provider>
+PageCore<Provider>::PageCore(void* addr, const PageLayout& layout,
+                   const Provider& provider)
+    : page_(static_cast<uint8_t*>(addr)), layout_(layout), provider_(provider)
 {
 }
 
-template <CoherencePolicyType Policy>
-bool PageCore<Policy>::Valid() const { return page_ != nullptr; }
+template <Coherent Provider>
+bool PageCore<Provider>::Valid() const { return page_ != nullptr; }
 
-template <CoherencePolicyType Policy>
-uint8_t* PageCore<Policy>::Data() const { return page_; }
+template <Coherent Provider>
+uint8_t* PageCore<Provider>::Data() const { return page_; }
 
-template <CoherencePolicyType Policy>
-PageMagicStatus PageCore<Policy>::Check() const
+template <Coherent Provider>
+PageMagicStatus PageCore<Provider>::Check() const
 {
   if (page_ == nullptr)
   {
@@ -383,7 +383,7 @@ PageMagicStatus PageCore<Policy>::Check() const
 
   const auto* header = reinterpret_cast<const PageHeader*>(page_);
   {
-    AccessWindow<Policy> header_window(coherence_, page_, sizeof(PageHeader),
+    AccessWindow<Provider> header_window(provider_, page_, sizeof(PageHeader),
                                AccessIntent::READ);
     if (header->magic == PAGE_MAGIC)
     {
@@ -409,7 +409,7 @@ PageMagicStatus PageCore<Policy>::Check() const
   // This path runs once on a mismatch (diagnostics), so a whole-page
   // invalidation costs nothing that matters -- but it must see every byte the
   // peer wrote, or a non-zero page would be misreported as unformatted.
-  AccessWindow<Policy> page_window(coherence_, page_, layout_.page_size, AccessIntent::READ);
+  AccessWindow<Provider> page_window(provider_, page_, layout_.page_size, AccessIntent::READ);
   for (size_t i = 0; i < layout_.page_size; ++i)
   {
     if (page_[i] != 0)
@@ -420,8 +420,8 @@ PageMagicStatus PageCore<Policy>::Check() const
   return PageMagicStatus::UNFORMATTED;
 }
 
-template <CoherencePolicyType Policy>
-PageMagicStatus PageCore<Policy>::Initialize()
+template <Coherent Provider>
+PageMagicStatus PageCore<Provider>::Initialize()
 {
   const auto status = Check();
 
@@ -438,17 +438,22 @@ PageMagicStatus PageCore<Policy>::Initialize()
   return status;
 }
 
-template <CoherencePolicyType Policy>
-void PageCore<Policy>::Format()
+template <Coherent Provider>
+void PageCore<Provider>::Format()
 {
   if (page_ == nullptr)
   {
     return;
   }
-  // 整页重写：一个 WRITE 窗口，离开时把整页脏行推回。
-  // The whole page is rewritten: one WRITE window pushes every dirty line back on
-  // exit.
-  AccessWindow<Policy> page_window(coherence_, page_, layout_.page_size, AccessIntent::WRITE);
+  // 整页重写：一个 WRITE_SYNC 窗口——离开时把整页脏行推回并作废
+  // （clean+invalidate），所以页在 DRAM 里立即可见，本地也不会留着一份"看起来写了"
+  // 的副本。就绪门的性质由这一次原子推回保证，见下面关于意图的说明。
+  // The whole page is rewritten in one WRITE_SYNC window: on exit every dirty line is
+  // pushed back and dropped (clean+invalidate), so the page is visible in DRAM at once
+  // and no local copy survives that merely *looks* written.  The readiness gate comes
+  // from that single atomic push-back, as the note on the intent below explains.
+  AccessWindow<Provider> page_window(provider_, page_, layout_.page_size,
+                                     AccessIntent::WRITE_SYNC);
   std::memset(page_, 0, layout_.page_size);
   auto* header = reinterpret_cast<PageHeader*>(page_);
   // 先写正文，magic 最后写。页头是固定布局（magic 在偏移 0），所以这里靠的是
@@ -468,29 +473,35 @@ void PageCore<Policy>::Format()
   header->tag = layout_.tag;
   header->magic = PAGE_MAGIC;
 
-  // 写完必须让它在 DRAM 里立刻可见，不能指望窗口退出的那次 clean 一定生效：
-  // `Format()` 是页上唯一一次"写完马上就会被读"的操作，而且跑在 bring-up 很早的位置，
-  // 缓存状态与稳态不同（C906 的维护指令与 `MHCR.DE` 的时序坑见
-  // `driver/shared_page/sg200x_cache_policy.hpp`）。
+  // 为什么是 WRITE_SYNC 而不是 WRITE：`Format()` 是页上唯一一次"写完马上就会被读回"
+  // 的操作，而且跑在 bring-up 最早的位置，缓存状态还没到稳态（C906 的维护指令与
+  // `MHCR.DE` 的时序坑见 `driver/shared_page/sg200x_thead_coherence.hpp`）。只 clean
+  // 不能证明字节已经到了 DRAM；读回本身又会先 invalidate，把脏行在被证明之前丢掉——
+  // 这正是之前"格式化完页在 DRAM 里仍是全零"的成因。所以退出动作必须是
+  // clean+invalidate，并且由窗口给出，而不是在这里手调一次 provider。
   //
-  // 顺序只能是一次 clean+invalidate（`Sync`），不能"clean 完再读回"：读回本身先
-  // invalidate，脏行会在被证明之前丢掉——这正是之前"格式化完页在 DRAM 里仍是全零"
-  // 的成因。失败留给调用方的 `Check()`，不会静默留在缓存里。
+  // 早先的版本确实在窗口内手调了 `provider_.Sync()`：那让引擎绕过自己的接缝，也打破了
+  // "写路径不请求 invalidate"这条不变式（当时是全仓唯一一处例外，且没有记录）。现在收
+  // 成意图，`Format()` 只声明"我写完整页、写完本地副本不可信"。
   //
-  // The write must be visible in DRAM immediately; the window's clean on exit is not
-  // proof.  `Format()` is the one operation whose writes are read straight away and it
-  // runs early in bring-up, where the cache state is not the steady-state one (see the
-  // policy header for the maintenance/MHCR.DE history).
+  // Why WRITE_SYNC and not WRITE: `Format()` is the one operation whose writes are read
+  // straight back, and it runs at the earliest point of bring-up, where the cache is
+  // not yet in its steady state (see the provider header for the C906 maintenance /
+  // `MHCR.DE` timing).  A clean alone does not prove the bytes reached DRAM, and a
+  // read-back invalidates first, discarding the dirty lines before they are proven --
+  // exactly how a formatted page once ended up all zeroes in DRAM.  So the exit action
+  // has to be clean+invalidate, and the window has to supply it rather than a hand
+  // call to the provider here.
   //
-  // The order must be one clean+invalidate (`Sync`), not "clean, then read back": a
-  // read-back invalidates first and discards the dirty lines before they are proven --
-  // exactly how a formatted page ended up all zeroes in DRAM.  A failure is left to the
-  // caller's `Check()` instead of staying silently dirty.
-  coherence_.Sync(page_, layout_.page_size);
+  // An earlier revision did call `provider_.Sync()` inside the window: that let the
+  // engine reach around its own seam and broke the "a write path never asks for
+  // invalidate" invariant (it was the tree's only exception, and an unrecorded one).
+  // It is an intent now, so `Format()` states only "I write the whole page and distrust
+  // the local copy afterwards".
 }
 
-template <CoherencePolicyType Policy>
-void PageCore<Policy>::ClearHistory()
+template <Coherent Provider>
+void PageCore<Provider>::ClearHistory()
 {
   if (page_ == nullptr)
   {
@@ -511,9 +522,9 @@ void PageCore<Policy>::ClearHistory()
   // 两条缓存行覆盖所有被改的计数：head 与遥测 state 相邻，区域 state 与 seq 相邻。
   // Two lines cover every counter touched: head is adjacent to the telemetry state,
   // and the region state to its seq.
-  AccessWindow<Policy> telemetry_counters(coherence_, head, 2 * sizeof(uint32_t),
+  AccessWindow<Provider> telemetry_counters(provider_, head, 2 * sizeof(uint32_t),
                                   AccessIntent::EXCHANGE);
-  AccessWindow<Policy> region_counters(coherence_, region_state, 2 * sizeof(uint32_t),
+  AccessWindow<Provider> region_counters(provider_, region_state, 2 * sizeof(uint32_t),
                                AccessIntent::EXCHANGE);
 
   uint32_t expected = 0;
@@ -535,8 +546,8 @@ void PageCore<Policy>::ClearHistory()
   telemetry_state->store(0, std::memory_order_release);
 }
 
-template <CoherencePolicyType Policy>
-void PageCore<Policy>::RecoverStaleClaims()
+template <Coherent Provider>
+void PageCore<Provider>::RecoverStaleClaims()
 {
   if (page_ == nullptr)
   {
@@ -553,9 +564,9 @@ void PageCore<Policy>::RecoverStaleClaims()
   // EXCHANGE drops a possibly stale local line first (the same line also carries
   // the peer's payload/seq), then clears the claim and pushes it back; a plain
   // store+clean would write the stale payload back over the peer's fresh value.
-  AccessWindow<Policy> telemetry_claim(coherence_, telemetry_state, sizeof(uint32_t),
+  AccessWindow<Provider> telemetry_claim(provider_, telemetry_state, sizeof(uint32_t),
                                AccessIntent::EXCHANGE);
-  AccessWindow<Policy> region_claim(coherence_, region_state, sizeof(uint32_t),
+  AccessWindow<Provider> region_claim(provider_, region_state, sizeof(uint32_t),
                             AccessIntent::EXCHANGE);
   telemetry_state->store(0, std::memory_order_release);
   region_state->store(0, std::memory_order_release);

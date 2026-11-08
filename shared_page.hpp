@@ -42,11 +42,11 @@ namespace LibXR
 /** @brief 平台帧几何必须给出的三个数 / The three numbers a platform geometry provides.
  *
  * 本库**不带任何 SoC 的默认几何**：页多大、多少槽、帧 ABI 第几版都是平台数据，由消费方
- * 在自己的契约头里声明（本板是 `User/guidance_contract.hpp` 的 `GuidancePageFormat`，
+ * 在自己的契约头里声明（本板是 `User/guidance_contract.hpp` 的 `Guidance::Format`，
  * 语义见 `docs/inter-core-protocol.md`）。换几何 = 换 traits，语义与 API 不动。
  * This library ships **no SoC's default geometry**: page size, slot count and frame ABI
  * version are platform data, declared by the consumer in its own contract header (on this
- * board `GuidancePageFormat` in `User/guidance_contract.hpp`, specified by
+ * board `Guidance::Format` in `User/guidance_contract.hpp`, specified by
  * `docs/inter-core-protocol.md`).  A different geometry is a different traits type, with
  * the semantics and API unchanged.
  *
@@ -348,10 +348,10 @@ inline constexpr bool channel_table_fits(const PageLayout& layout)
 
 /** @brief 一次访问想让谁看见 / Who one access must become visible to.
  *
- * 意图是调用点唯一要回答的问题；“做什么维护”由 `CoherencePolicy` 按意图决定。
+ * 意图是调用点唯一要回答的问题；“做什么维护”由这个域绑进来的 provider 决定。
  * 这正是 page 与外设驱动（DMA 的 clean/clean+invalidate/invalidate）共用的同一组
  * 答案，只是调用点问法不同。
- * Intent is the only question the call site answers; the policy turns it into
+ * Intent is the only question the call site answers; the provider turns it into
  * maintenance.  These are the same three answers the DMA driver already exposes
  * (`CleanForDevice` / `PrepareForDeviceWrite` / `InvalidateForCpu`), asked from
  * the accessor's side instead of the device's.
@@ -365,67 +365,99 @@ enum class AccessIntent : uint8_t
   /** 读改写：两边的副本都不可信，进入时同步、离开时推回。Read-modify-write:
    *  neither copy is authoritative, so sync on enter and publish on exit. */
   EXCHANGE,
+  /** 我写完整片范围，且写完后本地副本不可信：离开时推回并作废（clean+invalidate）。
+   *  Write the whole range and distrust the local copy afterwards: push it back and
+   *  drop it on exit (clean+invalidate).
+   *
+   *  与 `WRITE` 的差别只在退出动作：`WRITE` 只 clean，`WRITE_SYNC` clean+invalidate。
+   *  需要它的是"写完马上就要被读回"的场合——冷页格式化跑在 bring-up 最早的位置，
+   *  缓存状态还没到稳态（C906 的维护指令与 `MHCR.DE` 的时序坑见
+   *  `driver/shared_page/sg200x_thead_coherence.hpp`），只 clean 不足以证明字节已经
+   *  到了 DRAM。
+   *  It differs from `WRITE` only in the exit action: `WRITE` cleans, `WRITE_SYNC`
+   *  cleans and invalidates.  It is for "written, then read back right away" --
+   *  cold-page formatting runs at the earliest point of bring-up, where the cache is
+   *  not yet in its steady state (see the provider header for the C906 maintenance /
+   *  `MHCR.DE` timing), and a clean alone does not prove the bytes reached DRAM. */
+  WRITE_SYNC,
 };
 
-/** @brief 一致性策略的形态 / The shape of a coherency policy.
+/** @brief 一个能为一致性域提供三个动作的类型 / A type that can serve a coherency domain.
  *
- * 策略是**编译期类型**：三个 const 动作，`AccessWindow` 静态调用它们。空策略因此被
- * 完全内联掉；平台提供真实维护时也没有间接调用（`C906CachePolicy` 调 arch 原语，
- * `NoCachePolicy` 三个动作都是空）。
+ * 名字说的是**角色**，不是芯片：`THeadDcacheCoherence` 是这个角色的一个实现，
+ * `NoCoherence` 是“对端不存在”那一域的答案。“这段字节属于哪个域”由绑定点回答——
+ * 页别名的类型实参就是这一端的答案；“什么时候维护、维护哪些字节”由 `AccessWindow`
+ * 按访问意图问。所以一致性从来不是某一颗核的属性：单核自己的缓存谈不上“一致不一致”。
  *
- * 抽象的是**这段字节属于哪个一致性域、这次访问想让谁看见**，不是 cache 本身：对端是
- * “共 RAM 不共 cache 的核”时动作是 clean/invalidate，对端是绕过 cache 的 DMA 设备时
- * 也是同一组动作，对端不存在（NC 映射、单地址空间）时三个动作都是空。
+ * 它**不含地址，也不含长度**：那是 `AccessWindow`（一次访问）与 `Reference`（一段
+ * 字节的视图）的事。所以它不是一个 `Region`，只是 Region 模型里“这一域的答案”那一半。
+ *
+ * 类型是**编译期**的：三个 const 动作，`AccessWindow` 静态调用它们，`NoCoherence`
+ * 被完全内联掉，真实实现也没有间接调用（`THeadDcacheCoherence` 直接调 arch 原语）。
+ *
+ * 抽象的是**这次访问想让谁看见**，不是 cache 本身：对端是“共 RAM 不共 cache 的核”
+ * 时动作是 clean/invalidate，对端是绕过 cache 的 DMA 设备时也是同一组动作，对端不
+ * 存在（NC 映射、单地址空间）时三个动作都是空。
  *
  * 动作的实现还必须同时是编译器屏障（跨 TU 调用或带 `memory` clobber 的内联汇编），
  * 否则编译器和硬件都可能把数据访问挪到维护之外。类型只强制三个动作存在，屏障这一条
- * 由实现保证（`driver/shared_page/sg200x_cache_policy.hpp` 走带 `sync.s` 的跨 TU 调用）。
+ * 由实现保证（`driver/shared_page/sg200x_thead_coherence.hpp` 走带 `sync.s` 的跨 TU 调用）。
  *
- * A policy is a **compile-time type**: three const actions that `AccessWindow` calls
- * statically, so an empty policy is inlined away entirely and a real one costs no
- * indirect call (`C906CachePolicy` reaches the arch primitives, `NoCachePolicy` is
- * empty).
+ * Role, not chip: `THeadDcacheCoherence` is one implementation of this role and
+ * `NoCoherence` is the answer for a domain with no peer.  *Which* domain these bytes
+ * belong to is decided at the binding site -- the page alias's type argument is this
+ * side's answer -- and *when* and *over which bytes* to maintain is asked per access
+ * through `AccessWindow`.  That is why coherency is never a property of one core: a
+ * single core's own cache cannot be "coherent" or "incoherent".
+ *
+ * It carries **neither address nor length**: those belong to `AccessWindow` (one access)
+ * and `Reference` (a view over bytes).  So it is not a `Region`; it is the "answer for
+ * this domain" half of that model.
+ *
+ * The type is **compile-time**: three const actions that `AccessWindow` calls
+ * statically, so `NoCoherence` is inlined away entirely and a real implementation costs
+ * no indirect call (`THeadDcacheCoherence` reaches the arch primitives).
  *
  * The actions must also be compiler barriers (a cross-TU call, or inline asm with a
  * `memory` clobber), or the compiler and the hardware may move data accesses across
  * them.  The type can force the three actions to exist; the barrier is the
  * implementation's job.
  */
-template <typename Policy>
-concept CoherencePolicyType = requires(const Policy& policy, void* address,
-                                       const void* read_address, size_t bytes) {
-  policy.Publish(address, bytes);
-  policy.Refresh(read_address, bytes);
-  policy.Sync(address, bytes);
+template <typename Provider>
+concept Coherent = requires(const Provider& provider, void* address,
+                            const void* read_address, size_t bytes) {
+  provider.Publish(address, bytes);
+  provider.Refresh(read_address, bytes);
+  provider.Sync(address, bytes);
 };
 
 /** @brief 对端不存在的域（NC 映射 / 单地址空间）：三个动作都是空。
  *         A domain with no peer (NC mapping, single address space): all three actions
  *         are empty. */
-struct NoCachePolicy
+struct NoCoherence
 {
   void Publish(void*, size_t) const {}
   void Refresh(const void*, size_t) const {}
   void Sync(void*, size_t) const {}
 };
 
-/** @brief 函数指针策略：平台只提供三个自由函数时的桥。
- *         Function-pointer policy: the bridge for a platform that only provides three
+/** @brief 函数指针桥：平台只给三个自由函数时 / A bridge: the platform hands over three
  *         free functions.
  *
- * 仍然保留，因为“平台给三个函数”是嵌入式里最常见的形态（DMA 驱动、arch 缓存原语）。
- * 它比直接写一个策略类型多一层间接；要零间接就换成策略类型（`C906CachePolicy`）。
+ * 这是嵌入式里最常见的形态（DMA 驱动、arch 缓存原语），所以留着这座桥。它每个动作多
+ * 一次间接调用；要零间接就用真正的实现（`THeadDcacheCoherence`）。
+ *
  * Kept because "the platform hands over three functions" is the common embedded shape
- * (DMA drivers, arch cache primitives).  It costs one indirect call per action; a
- * policy type avoids that (`C906CachePolicy`).
+ * (DMA drivers, arch cache primitives).  It costs one indirect call per action; a real
+ * implementation costs none (`THeadDcacheCoherence`).
  */
-struct FunctionPointerPolicy
+struct FunctionPointerCoherence
 {
   using PublishFn = void (*)(void* address, size_t bytes);
   using RefreshFn = void (*)(const void* address, size_t bytes);
   using SyncFn = void (*)(void* address, size_t bytes);
 
-  constexpr FunctionPointerPolicy(PublishFn publish, RefreshFn refresh, SyncFn sync)
+  constexpr FunctionPointerCoherence(PublishFn publish, RefreshFn refresh, SyncFn sync)
       : publish_(publish), refresh_(refresh), sync_(sync)
   {
   }
@@ -445,12 +477,6 @@ struct FunctionPointerPolicy
   SyncFn sync_;
 };
 
-/// @brief 旧名字：函数指针策略 / The old name: the function-pointer policy.
-using CoherencePolicy = FunctionPointerPolicy;
-
-/** @brief 对端不存在的域（NC 映射 / 单地址空间）。A domain with no peer. */
-inline NoCachePolicy no_coherence() { return {}; }
-
 /** @brief 一段受一致性维护的访问窗口 / A maintenance window over one byte range.
  *
  * 进入时按意图做“读前”的动作，离开时做“写后”的动作；调用点因此不可能只配一半。
@@ -458,16 +484,16 @@ inline NoCachePolicy no_coherence() { return {}; }
  *
  * Applies the "before" action on entry and the "after" action on exit, by intent, so a
  * call site cannot apply half of a pair.  Deliberately not default constructible: a
- * window always has a policy and a range.  The policy is a compile-time type, so the
+ * window always has a provider and a range.  The provider is a compile-time type, so the
  * actions inline.
  */
-template <CoherencePolicyType Policy>
+template <Coherent Provider>
 class AccessWindow
 {
  public:
-  AccessWindow(const Policy& policy, const void* address, size_t bytes,
+  AccessWindow(const Provider& provider, const void* address, size_t bytes,
                AccessIntent intent)
-      : policy_(policy), address_(const_cast<void*>(address)), bytes_(bytes), intent_(intent)
+      : provider_(provider), address_(const_cast<void*>(address)), bytes_(bytes), intent_(intent)
   {
     if (bytes_ == 0 || address_ == nullptr)
     {
@@ -476,11 +502,11 @@ class AccessWindow
     }
     if (intent_ == AccessIntent::READ)
     {
-      policy_.Refresh(address_, bytes_);
+      provider_.Refresh(address_, bytes_);
     }
     else if (intent_ == AccessIntent::EXCHANGE)
     {
-      policy_.Sync(address_, bytes_);
+      provider_.Sync(address_, bytes_);
     }
   }
 
@@ -490,9 +516,13 @@ class AccessWindow
     {
       return;
     }
-    if (intent_ == AccessIntent::WRITE || intent_ == AccessIntent::EXCHANGE)
+    if (intent_ == AccessIntent::WRITE_SYNC)
     {
-      policy_.Publish(address_, bytes_);
+      provider_.Sync(address_, bytes_);
+    }
+    else if (intent_ == AccessIntent::WRITE || intent_ == AccessIntent::EXCHANGE)
+    {
+      provider_.Publish(address_, bytes_);
     }
   }
 
@@ -502,7 +532,7 @@ class AccessWindow
   AccessWindow& operator=(AccessWindow&&) = delete;
 
  private:
-  const Policy& policy_;
+  const Provider& provider_;
   void* address_;
   size_t bytes_;
   AccessIntent intent_;
@@ -518,7 +548,7 @@ class AccessWindow
  * Announcing and discovering are list operations, not a hot path: `Publish` writes one
  * whole generation (names validated before the window, table replaced inside an
  * `EXCHANGE` window) and `Find` looks one up by name inside a `READ` window.  The view
- * carries the page's policy, so a caller never handles cache maintenance itself.
+ * carries the page's provider, so a caller never handles cache maintenance itself.
  *
  * `CAPACITY` 是这张表在页布局里占的条目数；放不放得下由 `channel_table_fits()` 在编译期
  * 回答，构造时不再猜。
@@ -526,19 +556,19 @@ class AccessWindow
  * `channel_table_fits()` answers at compile time whether that fits, so construction
  * does not guess.
  */
-template <uint32_t CAPACITY, CoherencePolicyType Policy>
+template <uint32_t CAPACITY, Coherent Provider>
 class NameService
 {
  public:
   NameService() = default;
 
   /// @brief 绑定到一页（`addr` 是页基址，偏移由布局决定）。Bind to one page.
-  NameService(void* addr, const PageLayout& layout, const Policy& coherence)
+  NameService(void* addr, const PageLayout& layout, const Provider& provider)
       : table_(addr == nullptr
                    ? nullptr
                    : reinterpret_cast<ChannelTable<CAPACITY>*>(
                          static_cast<uint8_t*>(addr) + channel_offset(layout))),
-        coherence_(coherence)
+        provider_(provider)
   {
   }
 
@@ -549,7 +579,7 @@ class NameService
     {
       return false;
     }
-    AccessWindow window(coherence_, table_, sizeof(ChannelTable<CAPACITY>),
+    AccessWindow window(provider_, table_, sizeof(ChannelTable<CAPACITY>),
                         AccessIntent::READ);
     return table_->magic == CHANNEL_TABLE_MAGIC && table_->count <= CAPACITY;
   }
@@ -561,7 +591,7 @@ class NameService
     {
       return 0u;
     }
-    AccessWindow window(coherence_, table_, sizeof(ChannelTable<CAPACITY>),
+    AccessWindow window(provider_, table_, sizeof(ChannelTable<CAPACITY>),
                         AccessIntent::READ);
     return table_->magic == CHANNEL_TABLE_MAGIC ? table_->gen : 0u;
   }
@@ -590,7 +620,7 @@ class NameService
       }
     }
 
-    AccessWindow window(coherence_, table_, sizeof(ChannelTable<CAPACITY>),
+    AccessWindow window(provider_, table_, sizeof(ChannelTable<CAPACITY>),
                         AccessIntent::EXCHANGE);
     const uint32_t generation = table_->gen + 1u;
     table_->magic = CHANNEL_TABLE_MAGIC;
@@ -635,7 +665,7 @@ class NameService
       return false;
     }
 
-    AccessWindow window(coherence_, table_, sizeof(ChannelTable<CAPACITY>),
+    AccessWindow window(provider_, table_, sizeof(ChannelTable<CAPACITY>),
                         AccessIntent::READ);
     if (table_->magic != CHANNEL_TABLE_MAGIC || table_->count > CAPACITY)
     {
@@ -659,17 +689,17 @@ class NameService
 
  private:
   ChannelTable<CAPACITY>* table_ = nullptr;
-  [[no_unique_address]] Policy coherence_{};
+  [[no_unique_address]] Provider provider_{};
 };
 
 /** @brief Type-erased view of the telemetry ring. Protocol engine, see the .cpp. */
-template <CoherencePolicyType Policy>
+template <Coherent Provider>
 class TelemetryCore
 {
  public:
   TelemetryCore() = default;
   TelemetryCore(void* addr, const PageLayout& layout,
-                const Policy& coherence);
+                const Provider& provider);
 
   uint32_t Write(const void* sample);
   [[nodiscard]] uint32_t Head() const;
@@ -683,17 +713,17 @@ class TelemetryCore
   uint8_t* ring_ = nullptr;
   uint32_t stride_ = 0;
   uint32_t slots_ = 0;
-  [[no_unique_address]] Policy coherence_{};
+  [[no_unique_address]] Provider provider_{};
 };
 
 /** @brief Type-erased view of the region. Protocol engine, see the .cpp. */
-template <CoherencePolicyType Policy>
+template <Coherent Provider>
 class ReferenceCore
 {
  public:
   ReferenceCore() = default;
   ReferenceCore(void* addr, const PageLayout& layout,
-                const Policy& coherence);
+                const Provider& provider);
 
   [[nodiscard]] ErrorCode Read(void* out, uint32_t* seq, uint32_t retries) const;
   uint32_t Write(const void* payload);
@@ -705,17 +735,17 @@ class ReferenceCore
   std::atomic<uint32_t>* state_ = nullptr;
   std::atomic<uint32_t>* seq_ = nullptr;
   uint32_t payload_size_ = 0;
-  [[no_unique_address]] Policy coherence_{};
+  [[no_unique_address]] Provider provider_{};
 };
 
 /** @brief Type-erased page header operations. Protocol engine, see the .cpp. */
-template <CoherencePolicyType Policy>
+template <Coherent Provider>
 class PageCore
 {
  public:
   PageCore() = default;
   PageCore(void* addr, const PageLayout& layout,
-           const Policy& coherence);
+           const Provider& provider);
 
   [[nodiscard]] bool Valid() const;
   [[nodiscard]] uint8_t* Data() const;
@@ -740,17 +770,17 @@ class PageCore
   void ClearHistory();
   void RecoverStaleClaims();
 
-  /// @brief The policy this page was bound with. The views inherit it.
-  [[nodiscard]] const Policy& Coherence() const { return coherence_; }
+  /// @brief The provider this page was bound with. The views inherit it.
+  [[nodiscard]] const Provider& Coherence() const { return provider_; }
 
  private:
   uint8_t* page_ = nullptr;
   PageLayout layout_ = {};
-  [[no_unique_address]] Policy coherence_{};
+  [[no_unique_address]] Provider provider_{};
 };
 
 /** @brief Typed view of the telemetry ring for one sample type. */
-template <PagePod T, CoherencePolicyType Policy>
+template <PagePod T, Coherent Provider>
 class Telemetry
 {
  public:
@@ -758,8 +788,8 @@ class Telemetry
 
   /// @brief Bind to a page.
   Telemetry(void* addr, const PageLayout& layout,
-            const Policy& coherence)
-      : core_(addr, layout, coherence)
+            const Provider& provider)
+      : core_(addr, layout, provider)
   {
   }
 
@@ -801,11 +831,11 @@ class Telemetry
   }
 
  private:
-  TelemetryCore<Policy> core_;
+  TelemetryCore<Provider> core_;
 };
 
 /** @brief Typed view of the region for one payload type. */
-template <PagePod P, CoherencePolicyType Policy>
+template <PagePod P, Coherent Provider>
 class Reference
 {
  public:
@@ -813,8 +843,8 @@ class Reference
 
   /// @brief Bind to a page.
   Reference(void* addr, const PageLayout& layout,
-            const Policy& coherence)
-      : core_(addr, layout, coherence)
+            const Provider& provider)
+      : core_(addr, layout, provider)
   {
   }
 
@@ -864,7 +894,7 @@ class Reference
   }
 
  private:
-  ReferenceCore<Policy> core_;
+  ReferenceCore<Provider> core_;
 };
 
 /** @brief Typed view of one mapped page and its topic boundary.
@@ -874,7 +904,7 @@ class Reference
  * application-side wire version tag.
  */
 template <PageFormat F, PagePod T, PagePod P, uint32_t TAG = 0,
-          CoherencePolicyType Policy = FunctionPointerPolicy>
+          Coherent Provider = FunctionPointerCoherence>
 class SharedPage : public Topic
 {
  public:
@@ -885,31 +915,31 @@ class SharedPage : public Topic
 
   /// @brief Bind one mapped page and state its coherency domain.
   ///
-  /// 策略是**模板参数**：页必须回答“这段字节和谁共享、谁负责让它可见”，而回答发生在
-  /// 编译期——需要维护式访问的平台给自己那侧的 `Page` 别名填 `C906CachePolicy`，对端
-  /// 不存在（NC 映射 / 单地址空间）填 `NoCachePolicy`。默认值是函数指针策略，只为
-  /// 兼容“平台只给三个函数”的绑定点；产品契约不给默认。
-  /// The policy is a **template argument**: a page must answer "who shares these bytes
+  /// 这个 provider 是**模板参数**：页必须回答“这段字节和谁共享、谁负责让它可见”，而
+  /// 回答发生在编译期——需要维护式访问的平台给自己那侧的 `Page` 别名填
+  /// `THeadDcacheCoherence`，对端不存在（NC 映射 / 单地址空间）填 `NoCoherence`。
+  /// 默认值是函数指针桥，只为兼容“平台只给三个函数”的绑定点；产品契约不给默认。
+  /// The provider is a **template argument**: a page must answer "who shares these bytes
   /// and who makes them visible", and it answers at compile time -- a platform with
-  /// maintenance-mode access fills its own `Page` alias with `C906CachePolicy`, a domain
-  /// with no peer (NC mapping, single address space) with `NoCachePolicy`.  The default
-  /// is the function-pointer policy, only for bindings where the platform hands over
+  /// maintenance-mode access fills its own `Page` alias with `THeadDcacheCoherence`, a domain
+  /// with no peer (NC mapping, single address space) with `NoCoherence`.  The default
+  /// is the function-pointer provider, only for bindings where the platform hands over
   /// three functions; the product contract does not use the default.
-  SharedPage(void* addr, const Policy& coherence)
-      : core_(addr, Layout(), coherence)
+  SharedPage(void* addr, const Provider& provider)
+      : core_(addr, Layout(), provider)
   {
   }
-  SharedPage(void* addr, Topic topic, const Policy& coherence)
-      : Topic(topic), core_(addr, Layout(), coherence)
+  SharedPage(void* addr, Topic topic, const Provider& provider)
+      : Topic(topic), core_(addr, Layout(), provider)
   {
   }
 
   [[nodiscard]] bool Valid() const { return core_.Valid(); }
   [[nodiscard]] uint8_t* Data() const { return core_.Data(); }
 
-  /// @brief The coherency policy this page is bound to; a view created from this page
+  /// @brief The coherency provider this page is bound to; a view created from this page
   ///        inherits it instead of silently dropping it.
-  [[nodiscard]] const Policy& Coherence() const { return core_.Coherence(); }
+  [[nodiscard]] const Provider& Coherence() const { return core_.Coherence(); }
   [[nodiscard]] PageMagicStatus Check() const { return core_.Check(); }
 
   /** @brief Bring the page up: build a cold page, refuse a drifted one.
@@ -952,30 +982,30 @@ class SharedPage : public Topic
   void RecoverStaleClaims() { core_.RecoverStaleClaims(); }
 
   /// @brief Return the telemetry writer view.
-  [[nodiscard]] Telemetry<T, Policy> TelemetryWriter() const
+  [[nodiscard]] Telemetry<T, Provider> TelemetryWriter() const
   {
-    return Telemetry<T, Policy>(Data(), Layout(), core_.Coherence());
+    return Telemetry<T, Provider>(Data(), Layout(), core_.Coherence());
   }
 
   /// @brief Return the telemetry reader view.
-  [[nodiscard]] Telemetry<T, Policy> TelemetryReader() const
+  [[nodiscard]] Telemetry<T, Provider> TelemetryReader() const
   {
     return TelemetryWriter();
   }
 
   /// @brief Return the region view.
-  [[nodiscard]] Reference<P, Policy> Region() const
+  [[nodiscard]] Reference<P, Provider> Region() const
   {
-    return Reference<P, Policy>(Data(), Layout(), core_.Coherence());
+    return Reference<P, Provider>(Data(), Layout(), core_.Coherence());
   }
 
   /// @brief Return the name-service view for a table of `CAPACITY` entries.
   ///        返回 `CAPACITY` 个条目的通道表视图；能不能放下由 `channel_table_fits()` 在
   ///        编译期回答。
   template <uint32_t CAPACITY>
-  [[nodiscard]] NameService<CAPACITY, Policy> Channels() const
+  [[nodiscard]] NameService<CAPACITY, Provider> Channels() const
   {
-    return NameService<CAPACITY, Policy>(Data(), Layout(), core_.Coherence());
+    return NameService<CAPACITY, Provider>(Data(), Layout(), core_.Coherence());
   }
 
   /// @brief Write one telemetry sample.
@@ -985,7 +1015,7 @@ class SharedPage : public Topic
   [[nodiscard]] bool Latest(T* sample) const { return TelemetryReader().Latest(sample); }
 
  private:
-  PageCore<Policy> core_;  ///< Owns the policy; the typed views inherit it from here.
+  PageCore<Provider> core_;  ///< Owns the provider; the typed views inherit it from here.
 };
 
 }  // namespace LibXR

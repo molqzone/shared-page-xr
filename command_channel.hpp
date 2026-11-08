@@ -15,7 +15,7 @@
  * 命令、重复的通知要不要重放、失败怎么回执。向上只剩两条调用：
  *
  * ```cpp
- * guidance::Command command = {};
+ * Guidance::Command command = {};
  * uint32_t seq = 0;
  * if (channel.Wait(UINT32_MAX, &command, &seq) == LibXR::ErrorCode::OK) {
  *   channel.Ack(seq, ApplyCommand(command));   // 产品只写这一行业务
@@ -31,7 +31,7 @@
  * answered. Only two calls remain above:
  *
  * ```cpp
- * guidance::Command command = {};
+ * Guidance::Command command = {};
  * uint32_t seq = 0;
  * if (channel.Wait(UINT32_MAX, &command, &seq) == LibXR::ErrorCode::OK) {
  *   channel.Ack(seq, ApplyCommand(command));   // the product writes only this
@@ -77,11 +77,11 @@ inline constexpr uint32_t COMMAND_REJECTED = UINT32_MAX;
  * side-effecting command ("turn the LED on") twice.
  */
 template <typename F, PagePod T, PagePod P, uint32_t TAG = 0,
-          CoherencePolicyType Policy = FunctionPointerPolicy>
+          Coherent Provider = FunctionPointerCoherence>
 class CommandChannel
 {
  public:
-  using Page = SharedPage<F, T, P, TAG, Policy>;
+  using Page = SharedPage<F, T, P, TAG, Provider>;
 
   /// @brief 应用侧的载荷校验：magic/类型等，由产品给。
   ///        Application-side payload check (magic, type, ...), supplied by the product.

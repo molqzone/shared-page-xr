@@ -45,9 +45,9 @@ static_assert(sizeof(TestPayload) % sizeof(uint32_t) == 0);
 
 constexpr uint32_t VALID_MAGIC = 0x31444D47U;
 
-using TestPage = LibXR::SharedPage<Format, Sample, TestPayload, 0, LibXR::NoCachePolicy>;
+using TestPage = LibXR::SharedPage<Format, Sample, TestPayload, 0, LibXR::NoCoherence>;
 using TestChannel =
-    LibXR::CommandChannel<Format, Sample, TestPayload, 0, LibXR::NoCachePolicy>;
+    LibXR::CommandChannel<Format, Sample, TestPayload, 0, LibXR::NoCoherence>;
 
 /// @brief 通知侧的假实现：脚本化等待结果，记录回执。
 ///        Fake notification side: scripted wait result, recorded replies.
@@ -99,7 +99,7 @@ TestPayload MakePayload(uint32_t magic, uint16_t kind)
 ///    by `Ack`, not by `Wait`.
 void test_deliver_then_ack()
 {
-  TestPage page(g_page_storage.data(), LibXR::no_coherence());
+  TestPage page(g_page_storage.data(), LibXR::NoCoherence{});
   page.Format();
   TEST_ASSERT(page.Region().Write(MakePayload(VALID_MAGIC, 7)) == 1);
 
@@ -126,7 +126,7 @@ void test_deliver_then_ack()
 ///    2. Invalid payload: rejected with a reply, not delivered, no seq remembered.
 void test_invalid_payload_is_rejected()
 {
-  TestPage page(g_page_storage.data(), LibXR::no_coherence());
+  TestPage page(g_page_storage.data(), LibXR::NoCoherence{});
   page.Format();
   TEST_ASSERT(page.Region().Write(MakePayload(0xDEADBEEFU, 7)) == 1);
 
@@ -148,7 +148,7 @@ void test_invalid_payload_is_rejected()
 ///    3. Unformatted page: rejected; the publisher owns bringing the page up.
 void test_unformatted_page_is_rejected()
 {
-  TestPage page(g_cold_storage.data(), LibXR::no_coherence());
+  TestPage page(g_cold_storage.data(), LibXR::NoCoherence{});
 
   FakePort port;
   TestChannel channel(page, LibXR::Doorbell{&FakeWait, &FakeSignal, &FakeReply, &port},
@@ -166,7 +166,7 @@ void test_unformatted_page_is_rejected()
 ///    resends the previous reply. A new seq is delivered again.
 void test_repeated_notification_replays_reply()
 {
-  TestPage page(g_page_storage.data(), LibXR::no_coherence());
+  TestPage page(g_page_storage.data(), LibXR::NoCoherence{});
   page.Format();
   TEST_ASSERT(page.Region().Write(MakePayload(VALID_MAGIC, 9)) == 1);
 
@@ -205,7 +205,7 @@ void test_repeated_notification_replays_reply()
 ///    5. No notification means nothing outstanding: never reply.
 void test_no_notification_never_replies()
 {
-  TestPage page(g_page_storage.data(), LibXR::no_coherence());
+  TestPage page(g_page_storage.data(), LibXR::NoCoherence{});
   page.Format();
   TEST_ASSERT(page.Region().Write(MakePayload(VALID_MAGIC, 3)) == 1);
 
@@ -228,7 +228,7 @@ void test_no_notification_never_replies()
 ///    unbound page.
 void test_null_arguments()
 {
-  TestPage page(g_page_storage.data(), LibXR::no_coherence());
+  TestPage page(g_page_storage.data(), LibXR::NoCoherence{});
   page.Format();
 
   FakePort port;

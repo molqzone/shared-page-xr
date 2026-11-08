@@ -17,20 +17,20 @@ wire 类型（`Sample` / `Command` / 帧几何 / 通道表）在它的 `User/gui
 ```text
 shared_page.hpp / .cpp        页协议 + typed 视图：SharedPage<F, T, P, TAG, Policy> : Topic、
                                Telemetry<T, Policy>、Reference<P, Policy>、NameService；
-                               一致性策略是**编译期类型**（C906CachePolicy / NoCachePolicy），
-                               访问窗口 AccessWindow<Policy> 静态调用它。平台中立，两端同用
-shared_page_impl.hpp          私有实现头：模板化的页引擎，shared_page.cpp 为内置策略显式
-                               实例化；自定义策略的消费方 include 它来实例化自己那份
+                               一致性由**编译期的 provider** 给出（THeadDcacheCoherence / NoCoherence），
+                               访问窗口 AccessWindow<Provider> 静态调用它。平台中立，两端同用
+shared_page_impl.hpp          私有实现头：模板化的页引擎，shared_page.cpp 为内置 provider 显式
+                               实例化；自定义 provider 的消费方 include 它来实例化自己那份
 doorbell.hpp                  响铃接缝（header-only）：Doorbell = Wait（等通知，OK 即有
                                在途请求）+ Signal（无载荷叫醒对端）+ Reply（回答刚那条），
                                全是注入的函数指针，平台中立
 channel table                 页布局的一部分（`ChannelTable<CAPACITY>` / `NameService`）：
-                              名字 → 端点的通告与发现，代次语义，维护由页的策略负责
+                              名字 → 端点的通告与发现，代次语义，维护由页绑定的 provider 负责
 command_channel.hpp           命令方向（header-only）：Doorbell（通知+回执，注入）
                                + CommandChannel<F, T, P, TAG, Policy>：等、读、校验、去重、回执
 linux_mapping.hpp             Linux 绑定：UioMapping（按 sysfs 名找 /dev/uioN，按 map
                                索引 mmap）+ 该映射的一致性域（pgprot_noncached →
-                               NoCachePolicy）。只有 Linux 消费者显式 include 才进入
+                               NoCoherence）。只有 Linux 消费者显式 include 才进入
                                编译，中立核心不引用它
 CMakeLists.txt                STATIC target shared_page_xr，只编 shared_page.cpp，链接 libxr；
                                doorbell / command_channel / linux_mapping 是 header-only，
@@ -39,12 +39,12 @@ CMakeLists.txt                STATIC target shared_page_xr，只编 shared_page.
 
 声明与实现分开：`shared_page.hpp` 保留契约与类声明，协议逻辑在私有实现头
 `shared_page_impl.hpp`（模板化的 `TelemetryCore` / `ReferenceCore` / `PageCore`），
-`shared_page.cpp` 只为内置策略显式实例化；typed 层只是带 `static_assert` 的薄转发，
+`shared_page.cpp` 只为内置 provider 显式实例化；typed 层只是带 `static_assert` 的薄转发，
 所以 wire 类型变了也不会复制协议实现。
 
 **数据路径由消费侧驱动，库不替它决定怎么等。** `SharedPage` 只是一个绑定到页的视图：
 页指针与一致性域是构造参数，什么时候读、被什么唤醒由调用方决定（板端是
-`RTOS_CMDQU_WAIT_EVENT` 的阻塞唤醒，见 `tools/guidance-cli`）。刻意不提供轮询入口：
+`RTOS_CMDQU_WAIT_EVENT` 的阻塞唤醒，见消费方仓的用户态工具）。刻意不提供轮询入口：
 轮询一旦存在就会因为“方便”变成实际使用的那条。周期代码只许看状态（`Head()` 的时鲜），
 不许过手数据。
 
@@ -53,7 +53,7 @@ CMakeLists.txt                STATIC target shared_page_xr，只编 shared_page.
 
 原先的宿主适配器（等 `LibXR::Semaphore` → drain → publish）已删除：它的唯一消费者是
 自己的测试，而且它不认识帧布局，会把未校验的样本 publish 出去。等真的出现第二个消费者、
-形状明确时再写，并把 `guidance::ReadSample()` 的校验一并接进去。
+形状明确时再写，并把 `Guidance::ReadSample()` 的校验一并接进去。
 
 ## 帧格式是平台数据，载荷是应用数据，语义归本库
 
@@ -125,9 +125,9 @@ for (;;) {
 
 ```cpp
 // C906L 侧：通知与回执由平台绑定实现（这里是 mailbox doorbell），页层不认识它
-guidance::CommandChannel channel(page, mailbox_port.Port(), guidance::CommandValid);
+Guidance::CommandChannel channel(page, mailbox_port.Port(), Guidance::CommandValid);
 for (;;) {
-  guidance::Command command = {};
+  Guidance::Command command = {};
   uint32_t seq = 0;
   if (channel.Wait(LibXR::WAIT_FOREVER, &command, &seq) != LibXR::ErrorCode::OK) {
     continue;                       // 超时/无效/重复，页层已经按合同回执过
@@ -174,13 +174,13 @@ distinguishable, and announcing/looking up go through `NameService<CAPACITY>`
 与 `libxr/src/structure/queue/spsc_queue_base.hpp` 的 `head_`/`tail_` 一样使用
 acquire/release；padding 中的写入状态覆盖 payload 的同步窗口。读者检查状态和索引，
 拷贝后复读，变化就重试。**协议本身**不需要 futex、描述符队列或异步状态机；
-acquire/release 消除访存次序问题，可见性则交给注入的一致性策略，两者正交。
+acquire/release 消除访存次序问题，可见性则交给注入的 provider，两者正交。
 
-**可见性归策略，不归协议。** 对端是 non-cacheable 映射（Linux 的 uio 映射）或单地址
-空间时，三个动作是空的（`NoCachePolicy`）；像 C906 这样无法把共享页排除出可缓存区间的
-平台给自己的 `Page` 别名填 `C906CachePolicy`（三个动作直接调 arch 原语）。策略是
-`SharedPage` 的**模板参数**（概念 `CoherencePolicyType`），所以漏写就是编译错误、
-空策略被完全内联、真实策略没有间接调用。页引擎用 `AccessWindow<Policy>` 按意图成对调用：
+**可见性归 provider，不归协议。** 对端是 non-cacheable 映射（Linux 的 uio 映射）或单地址
+空间时，三个动作是空的（`NoCoherence`）；像 C906 这样无法把共享页排除出可缓存区间的
+平台给自己的 `Page` 别名填 `THeadDcacheCoherence`（三个动作直接调 arch 原语）。provider 是
+`SharedPage` 的**模板参数**（概念 `Coherent`），所以漏写就是编译错误、
+空 provider 被完全内联、真实实现没有间接调用。页引擎用 `AccessWindow<Provider>` 按意图成对调用：
 
 | 意图 | 进入时 | 离开时 |
 |---|---|---|
@@ -188,9 +188,9 @@ acquire/release 消除访存次序问题，可见性则交给注入的一致性�
 | `WRITE` | — | `Publish`（clean） |
 | `EXCHANGE` | `Sync`（clean+invalidate） | `Publish`（clean） |
 
-策略是 `SharedPage` 的模板参数：没有“省略即不维护”的路径，因为漏写策略类型根本不
-编译。Linux 侧把答案放在映射旁边（`mapping.Coherence()` 返回 `NoCachePolicy`），固件
-侧在类型别名里写死（`guidance::Page<LibXR::C906CachePolicy>`）。
+provider 是 `SharedPage` 的模板参数：没有“省略即不维护”的路径，因为漏写 provider 类型
+根本不编译。Linux 侧把答案放在映射旁边（`mapping.Coherence()` 返回 `NoCoherence`），固件
+侧在类型别名里写死（`Guidance::Page<LibXR::THeadDcacheCoherence>`）。
 
 读到一半的槽位永远在 `head` 之外，所以读路径只需要 `Refresh`；而 claim、
 `ClearHistory`、`RecoverStaleClaims` 这类读改写必须两边都动（`EXCHANGE`），旧的两钩子
@@ -214,7 +214,7 @@ acquire/release 消除访存次序问题，可见性则交给注入的一致性�
 * `SharedPage` 继承 LibXR `Topic`：页本身就能当 topic 发布出去，等事件、drain、发布
   的时序由消费侧决定（本仓库不替它做决定——原先的 `SharedPageHost` 适配器已删除，因为
   除它自己的测试外没有消费者；等 UIO + 用户态 LibXR 真接上线时，按那时的消费者形状再写，
-  并把 `guidance::ReadSample()` 的校验一并接进去）。
+  并把 `Guidance::ReadSample()` 的校验一并接进去）。
 
 ## 测试
 
@@ -249,18 +249,18 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-消费方在自己开启测试时把该选项打开：`bsp-guidance-action` 的
-`tools/guidance-cli` 与 `tools/guidance-contract` 都是这样的消费方，它们建 libxr、
-shared-page-xr 与本仓的测试目标，然后 `ctest --test-dir build-guidance-cli` 运行契约测试。
+消费方在自己开启测试时把该选项打开：`bsp-guidance-action` 的 `User/tests` 与
+`tools/guidance-contract` 都是这样的消费方，它们建 libxr、shared-page-xr 与本仓的测试
+目标，然后 `ctest --test-dir /tmp/sg200x-app-tests` 运行契约测试。
 
 `test_shared_page.cpp`：布局与发布索引——帧几何跟随注入 format、`TelemetryRing`/`Region`
 跟随注入类型的偏移与总长、页头自描述互验与 `MISMATCH`（TAG/载荷尺寸/帧几何漂移）、
 `Latest`/`Since` 的边界（SLOT_COUNT 槽余量、gap、新纪元）、region 稳定读与撕裂重试、
 通道表（偏移由布局算出、通告与按名查找、越界与空名被拒）。
-`test_coherency.cpp`：把记录型函数当作策略，钉住意图→动作的映射——写路径不请求
+`test_coherency.cpp`：把记录型 provider 当作平台的答案，钉住意图→动作的映射——写路径不请求
 invalidate、读路径不请求 clean、样本先于 `head` 发布、payload 先于 `seq` 发布、破 claim
 先同步再推回、格式化是整页范围、通道表通告 EXCHANGE / 查找 READ。它不需要板子，因为
-维护动作现在是注入的策略。
+维护动作现在是注入的 provider。
 `test_doorbell.cpp`：三个动词各走各的指针——`Wait` 原样传超时、`Signal` 不回执、
 `Reply` 不响铃、拷贝后仍指向同一实现。
 `test_command_channel.cpp`：通知侧是假的 `Doorbell`，逐条摆出“有通知/没通知/重复
@@ -271,5 +271,5 @@ invalidate、读路径不请求 clean、样本先于 `head` 发布、payload 先
 
 `libxr` 尚未作为本仓库的 submodule pin 住（`.gitmodules` 里没有它），所以「单独构建
 本仓库」目前要求旁边已有一份 libxr，或者从 `bsp-guidance-action` 的
-`tools/guidance-cli` / `tools/guidance-contract` 构建。补上后单独 `git clone
+`User/tests` / `tools/guidance-contract` 构建。补上后单独 `git clone
 --recursive` 即可自带测试依赖。

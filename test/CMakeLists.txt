@@ -74,20 +74,19 @@ target_compile_options(command_channel_test PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME command_channel_contract COMMAND command_channel_test)
 set_tests_properties(command_channel_contract PROPERTIES TIMEOUT 30)
 
-# `linux_mapping.hpp`：平台绑定，眼下**没有消费者**——没有别的翻译单元 include 它，
-# 于是一次重命名（`C906CachePolicy` → `THeadDcacheCoherence`）可以改完却没人编译过。
-# 这里只做编译与链接，不做行为断言：UIO 的 mmap 索引与 `pgprot_noncached` 语义只能在
-# 板上验，这条测试存在的唯一理由是“别让它悄悄烂掉”。
-# `linux_mapping.hpp`: a platform binding with **no consumer today** -- no other
-# translation unit includes it, so a rename (`C906CachePolicy` -> `THeadDcacheCoherence`)
-# went through without anything ever compiling it.  This target compiles and links only,
-# never asserts behaviour: the UIO mmap indices and `pgprot_noncached` semantics belong to
-# a board.  Its one job is to stop the file from rotting silently.
+# `linux_mapping.hpp`：UIO 的设备/map 发现。真机上的 sysfs 造不出来，但这几个函数
+# 都收一个 root，所以测试搭一棵假树，把"按名字选设备、按名字选 map、字节数取 sysfs"
+# 这三件事钉住——`bsp-guidance-vision` 手写过一份同样的查找，两份答案不一致时错的
+# 那份会静默读到 console 页。
+# `linux_mapping.hpp`: UIO device and map discovery.  A real sysfs cannot be faked, but
+# the helpers take a root, so the test builds a fake tree and pins the three facts --
+# device by name, map by name, size from sysfs.  The vision repository hand-wrote this
+# lookup once; when two answers disagree, the wrong one silently reads the console page.
 if(UNIX)
-  add_executable(linux_binding_compile compile_bindings.cpp)
-  target_link_libraries(linux_binding_compile PRIVATE shared_page_xr)
-  target_include_directories(linux_binding_compile PRIVATE ${CMAKE_CURRENT_LIST_DIR})
-  target_compile_options(linux_binding_compile PRIVATE -Wall -Wextra -Wpedantic)
-  add_test(NAME linux_binding_compiles COMMAND linux_binding_compile)
-  set_tests_properties(linux_binding_compiles PROPERTIES TIMEOUT 30)
+  add_executable(linux_mapping_test test_linux_mapping.cpp)
+  target_link_libraries(linux_mapping_test PRIVATE shared_page_xr)
+  target_include_directories(linux_mapping_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+  target_compile_options(linux_mapping_test PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME linux_mapping_discovery COMMAND linux_mapping_test)
+  set_tests_properties(linux_mapping_discovery PROPERTIES TIMEOUT 30)
 endif()

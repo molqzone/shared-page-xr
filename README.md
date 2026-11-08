@@ -28,10 +28,11 @@ channel table                 页布局的一部分（`ChannelTable<CAPACITY>` /
                               名字 → 端点的通告与发现，代次语义，维护由页绑定的 provider 负责
 command_channel.hpp           命令方向（header-only）：Doorbell（通知+回执，注入）
                                + CommandChannel<F, T, P, TAG, Policy>：等、读、校验、去重、回执
-linux_mapping.hpp             Linux 绑定：UioMapping（按 sysfs 名找 /dev/uioN，按 map
-                               索引 mmap）+ 该映射的一致性域（pgprot_noncached →
-                               NoCoherence）。只有 Linux 消费者显式 include 才进入
-                               编译，中立核心不引用它
+linux_mapping.hpp             Linux 绑定：UioMapping（按 sysfs 名找 /dev/uioN；
+                               `OpenNamed()` 再按 `maps/mapN/name` 选段、字节数取
+                               `size`）+ 该映射的一致性域（pgprot_noncached →
+                               NoCoherence）。由 `bsp-guidance-vision` 消费，中立核心
+                               不引用它
 CMakeLists.txt                STATIC target shared_page_xr，只编 shared_page.cpp，链接 libxr；
                                doorbell / command_channel / linux_mapping 是 header-only，
                                不触平台 UAPI，任何平台可编译
@@ -48,8 +49,9 @@ CMakeLists.txt                STATIC target shared_page_xr，只编 shared_page.
 轮询一旦存在就会因为“方便”变成实际使用的那条。周期代码只许看状态（`Head()` 的时鲜），
 不许过手数据。
 
-本库不接触任何平台 UAPI——页指针是注入的：Linux 侧的 UIO 绑定在 `linux_mapping.hpp`，
-由消费者自行 include；其他平台给链接脚本符号或静态缓冲即可。
+本库不接触任何平台 UAPI——页指针是注入的：Linux 侧的 UIO 绑定在 `linux_mapping.hpp`
+（`bsp-guidance-vision` 用它拿页，那份手写的设备/map 查找已经并进来）；其他平台给链接
+脚本符号或静态缓冲即可。
 
 原先的宿主适配器（等 `LibXR::Semaphore` → drain → publish）已删除：它的唯一消费者是
 自己的测试，而且它不认识帧布局，会把未校验的样本 publish 出去。等真的出现第二个消费者、

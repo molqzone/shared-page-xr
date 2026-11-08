@@ -21,6 +21,12 @@ jobs:
       - name: fetch LibXR
         run: git clone --depth 1 https://github.com/jiu-xiao/libxr libxr
 
+      # LibXR 的 linux 驱动后端通过 pkg-config 找 libudev；runner 预装里没有。
+      # LibXR's linux driver backend finds libudev through pkg-config, which the runner
+      # does not ship with.
+      - name: system deps
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
       - name: configure
         run: cmake -S . -B build -DSHARED_PAGE_XR_TEST_BUILD=ON -DCMAKE_BUILD_TYPE=Debug
 

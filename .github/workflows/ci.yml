@@ -1,0 +1,31 @@
+# 主机侧 CI：一个 job，编译 + 跑四组契约测试。没有专用硬件，也不需要。
+# Host CI: one job, build plus the four contract test suites. No hardware, none needed.
+#
+# 这个仓库是 submodule，不带 libxr 的 gitlink（消费方各带各的），所以 CI 自己拿一份：
+# 用同一个公开仓，pin 由 libxr 的默认分支决定。要复现 CI 的结果，就在本机做同样的事。
+# This repo is a submodule and does not carry libxr as a gitlink (consumers bring their
+# own), so CI fetches a copy from the same public repo, pinned to libxr's default branch.
+# To reproduce a CI result locally, do exactly this.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: fetch LibXR
+        run: git clone --depth 1 https://github.com/jiu-xiao/libxr libxr
+
+      - name: configure
+        run: cmake -S . -B build -DSHARED_PAGE_XR_TEST_BUILD=ON -DCMAKE_BUILD_TYPE=Debug
+
+      - name: build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: test
+        run: ctest --test-dir build --output-on-failure

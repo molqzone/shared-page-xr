@@ -454,8 +454,17 @@ void PageCore<Provider>::Format()
   // from that single atomic push-back, as the note on the intent below explains.
   AccessWindow<Provider> page_window(provider_, page_, layout_.page_size,
                                      AccessIntent::WRITE_SYNC);
-  std::memset(page_, 0, layout_.page_size);
   auto* header = reinterpret_cast<PageHeader*>(page_);
+  // 世代号必须在 `memset` **之前**读：它是唯一要跨复位保留的状态。页在核复位后
+  // 仍在（reserved memory），只有掉电才归零；所以"上一次是完整的一页"这个前提
+  // 用 magic 校验，校验不过就从 0 重新开始。
+  // The generation is read *before* the memset: it is the one value that has to
+  // survive a core reset.  The page outlives the core (reserved memory) and only a
+  // power cycle clears it, so "the previous content was a complete page" is checked
+  // with the magic; when that fails the count restarts at zero.
+  auto* generation = reinterpret_cast<uint32_t*>(page_ + header_generation_offset());
+  const uint32_t previous_generation = header->magic == PAGE_MAGIC ? *generation : 0u;
+  std::memset(page_, 0, layout_.page_size);
   // 先写正文，magic 最后写。页头是固定布局（magic 在偏移 0），所以这里靠的是
   // **同一个 WRITE 窗口内的写顺序**：对端在一次 clean 之后只会看到"全零"或
   // "完整的一页"，不会看到半张页——就绪门的性质由窗口的原子推回保证，而不是
@@ -471,6 +480,7 @@ void PageCore<Provider>::Format()
   header->payload_size = layout_.payload_size;
   header->region_offset = layout_.region_offset;
   header->tag = layout_.tag;
+  *generation = previous_generation + 1u;
   header->magic = PAGE_MAGIC;
 
   // 为什么是 WRITE_SYNC 而不是 WRITE：`Format()` 是页上唯一一次"写完马上就会被读回"

@@ -117,6 +117,31 @@ inline constexpr size_t telemetry_offset()
   return align_up(sizeof(PageHeader), PAGE_CACHE_LINE);
 }
 
+/// @brief 页头之后、环形区之前的那段填充里放一个“世代号”。
+///        A generation counter in the header padding, ahead of the ring.
+///
+/// `PageHeader` 是 32 字节，环形区从 64 字节开始，所以 32..63 这一段本来是空洞。
+/// 世代号放在这里：固件每次 `Format()` 都把它 +1，于是主机能区分两件不同的事——
+/// - `write_state != 0`：这一次写还没完成（seqlock，丢弃这一帧）；
+/// - 世代号变了：**对端换了条命**（复位/重启），旧槽位、旧序号全部作废。
+///
+/// 这不是兜底逻辑，是共享内存 IPC 的第二个计数器：`seq` 管同一世代内的顺序，
+/// 世代号管世代本身。TI 的 IPC crash recovery 用 crash counter、virtio/rpmsg 用
+/// reset + NS_DESTROY 做的是同一件事。
+///
+/// The header is 32 bytes and the ring starts at 64, so 32..63 is padding.  The
+/// generation counter lives there: `Format()` increments it, so the host can tell
+/// "this write has not finished" (seqlock, drop the frame) from "the peer restarted"
+/// (every sequence, every slot is stale).  It is the second counter such a protocol
+/// needs: `seq` orders writes inside one generation, the generation numbers the
+/// generations themselves.
+inline constexpr size_t header_generation_offset()
+{
+  return sizeof(PageHeader);
+}
+static_assert(header_generation_offset() + sizeof(uint32_t) <= PAGE_CACHE_LINE,
+              "the generation counter must fit in the header's padding");
+
 /** @brief Result of validating a mapped page.
  *
  * `MISMATCH` 区别于 `FOREIGN`：魔术字正确但几何/载荷/标签对不上，说明双端用了不同

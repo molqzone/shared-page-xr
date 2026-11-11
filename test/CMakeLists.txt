@@ -62,6 +62,21 @@ target_compile_options(doorbell_test PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME doorbell_seam COMMAND doorbell_test)
 set_tests_properties(doorbell_seam PROPERTIES TIMEOUT 30)
 
+# `mailbox.hpp`：整颗通知外设的接缝——五个动词各走各的指针、Wait 报告是哪条通道、
+# 没有的能力是空操作、Doorbell 适配器只承载 0 号通道。真实硬件上这几个动词共用一套
+# 寄存器（HSEM 的 RLR、IPCC 的通道），混淆了在板上会表现成"遥测把回执吃掉"。
+# `mailbox.hpp`: the seam for the whole notification peripheral -- each verb reaches
+# its own pointer, Wait reports which channel rang, absent capabilities are no-ops,
+# and the Doorbell adapter carries only channel 0. On real hardware these verbs share
+# one register set (HSEM's RLR, IPCC's channels), so mixing them up would show up on
+# the board as "telemetry ate the reply".
+add_executable(mailbox_test test_mailbox.cpp)
+target_link_libraries(mailbox_test PRIVATE shared_page_xr)
+target_include_directories(mailbox_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_compile_options(mailbox_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME mailbox_seam COMMAND mailbox_test)
+set_tests_properties(mailbox_seam PROPERTIES TIMEOUT 30)
+
 # `command_channel.hpp`：命令方向的四件事（通知、区域快照、校验、重复通知重放）。
 # 通知侧是假的 `Doorbell`，所以“有没有越权回执”也能在主机上钉住。
 # `command_channel.hpp`: the four command-direction steps (notify, region snapshot,

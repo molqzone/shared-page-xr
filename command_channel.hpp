@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "doorbell.hpp"
+#include "mailbox.hpp"
 #include "shared_page.hpp"
 
 /**
@@ -22,7 +22,8 @@
  * }
  * ```
  *
- * 通知侧是注入的 `Doorbell`：mailbox context 命令、rpmsg endpoint 或别的，页层不认识。
+ * 通知侧是注入的 `Mailbox::Channel`：mailbox context 命令、rpmsg endpoint 或别的，
+ * 页层不认识具体外设。
  * 回执也归它，因为“回给刚收到的那一条”是发送方协议，不是产品逻辑。
  *
  * Everything cross-core about the command direction lives here: whether the page is
@@ -38,7 +39,7 @@
  * }
  * ```
  *
- * The notification side is an injected `Doorbell` -- a mailbox context command, an rpmsg
+ * The notification side is an injected `Mailbox::Channel` -- a mailbox context command, an
  * endpoint, anything -- and the reply lives there too, because "answer the one just
  * received" is the sender's protocol, not product logic.
  */
@@ -87,8 +88,8 @@ class CommandChannel
   ///        Application-side payload check (magic, type, ...), supplied by the product.
   using ValidateFn = bool (*)(const P& payload);
 
-  CommandChannel(const Page& page, Doorbell doorbell, ValidateFn validate)
-      : page_(page), doorbell_(doorbell), validate_(validate)
+  CommandChannel(const Page& page, const Mailbox::Channel& channel, ValidateFn validate)
+      : page_(page), channel_(channel), validate_(validate)
   {
   }
 
@@ -110,7 +111,7 @@ class CommandChannel
       return ErrorCode::PTR_NULL;
     }
 
-    const ErrorCode notified = doorbell_.Wait(timeout_ms);
+    const ErrorCode notified = channel_.Wait(timeout_ms);
     if (notified != ErrorCode::OK)
     {
       // 没有在途命令：不回执，否则会回答一条不存在的命令。
@@ -122,7 +123,7 @@ class CommandChannel
     {
       // 页没建起来（漂移或外来页）：没有页头就没有命令槽可读，回执拒绝。
       // The page was not brought up (drift or foreign): no header, no slot to read.
-      doorbell_.Reply(COMMAND_REJECTED);
+      channel_.Reply(COMMAND_REJECTED);
       return ErrorCode::FAILED;
     }
 
@@ -131,19 +132,19 @@ class CommandChannel
     const ErrorCode read = page_.Region().Read(&payload, &observed);
     if (read != ErrorCode::OK)
     {
-      doorbell_.Reply(COMMAND_REJECTED);
+      channel_.Reply(COMMAND_REJECTED);
       return read;
     }
 
     if (validate_ == nullptr || !validate_(payload))
     {
-      doorbell_.Reply(COMMAND_REJECTED);
+      channel_.Reply(COMMAND_REJECTED);
       return ErrorCode::EMPTY;
     }
 
     if (have_last_ && observed == last_seq_)
     {
-      doorbell_.Reply(last_result_);
+      channel_.Reply(last_result_);
       return ErrorCode::EMPTY;
     }
 
@@ -168,12 +169,12 @@ class CommandChannel
     ASSERT(!have_last_ || seq == last_seq_);
     (void)seq;
     last_result_ = result;
-    doorbell_.Reply(result);
+    channel_.Reply(result);
   }
 
  private:
   Page page_;
-  Doorbell doorbell_;
+  const Mailbox::Channel& channel_;
   ValidateFn validate_;
   uint32_t last_seq_ = 0;
   uint32_t last_result_ = 0;

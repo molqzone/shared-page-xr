@@ -3,13 +3,13 @@
  * @brief `CommandChannel` 的命令方向契约 / Command-direction contract of
  *        `CommandChannel`.
  *
- * 通知侧是假的：`Doorbell` 只由三条注入函数指针构成，所以这些测试可以逐条摆出
+ * 通知侧是假的：`Mailbox` 只是一组注入的函数指针，所以这些测试可以逐条摆出
  * “有通知 / 没通知 / 重复通知”，并检查通道到底回执了什么、有没有越权回执。命令通道
  * 只该用其中两个动词——`Signals()` 那条断言就是钉住“它不会替业务去叫醒对端”。
  * 覆盖：页不可用、通知超时、载荷无效、重复通知重发上次回执、`Ack` 之后才回执、
  * 空参数不消耗通知、通道从不 `Signal()`。
  *
- * The notification side is fake: `Doorbell` is just three injected function pointers, so
+ * The notification side is fake: `Mailbox` is just injected function pointers, so
  * these tests can stage "notified / not notified / notified again" one case at a time
  * and check exactly what the channel replied -- and that it never replies when nothing
  * is outstanding.  The channel may only use two of the three verbs, which the
@@ -60,24 +60,56 @@ struct FakePort
   uint32_t last_reply = 0;
 };
 
-LibXR::ErrorCode FakeWait(void* context, uint32_t)
+LibXR::ErrorCode FakeWait(void* context, uint32_t, uint32_t* channel)
 {
   auto* port = static_cast<FakePort*>(context);
   ++port->waits;
+  if (channel != nullptr)
+  {
+    *channel = 0u;
+  }
   return port->wait_result;
 }
 
-void FakeSignal(void* context)
+void FakeSignal(void* context, uint32_t channel)
 {
   auto* port = static_cast<FakePort*>(context);
-  ++port->signals;
+  if (channel == 0u)
+  {
+    ++port->signals;
+  }
 }
 
-void FakeReply(void* context, uint32_t result)
+void FakeReply(void* context, uint32_t channel, uint32_t result)
 {
   auto* port = static_cast<FakePort*>(context);
-  ++port->replies;
-  port->last_reply = result;
+  if (channel == 0u)
+  {
+    ++port->replies;
+    port->last_reply = result;
+  }
+}
+
+/// 测试用的假外设：一条通道，句柄存储在 FakeMailbox 里。
+/// The test's fake peripheral: one channel, with the handle stored inside.
+struct FakeMailbox
+{
+  FakeMailbox(FakePort& port)
+      : mailbox(&FakeWait, &FakeSignal, &FakeReply, nullptr, nullptr, &channel, 1u,
+                &port)
+  {
+  }
+
+  LibXR::Mailbox mailbox;
+  LibXR::Mailbox::Channel channel;
+};
+
+/// @brief 取假外设的 0 号通道；存储由调用方给，避免测试之间共享状态。
+///        Take channel 0 of the fake peripheral; the caller owns the storage so no
+///        state leaks between tests.
+LibXR::Mailbox::Channel MakeFakeMailbox(FakeMailbox& storage)
+{
+  return storage.mailbox.GetChannel(0u);
 }
 
 bool ValidPayload(const TestPayload& payload) { return payload.magic == VALID_MAGIC; }
@@ -104,7 +136,8 @@ void test_deliver_then_ack()
   TEST_ASSERT(page.Region().Write(MakePayload(VALID_MAGIC, 7)) == 1);
 
   FakePort port;
-  TestChannel channel(page, LibXR::Doorbell{&FakeWait, &FakeSignal, &FakeReply, &port},
+  FakeMailbox mailbox(port);
+  TestChannel channel(page, MakeFakeMailbox(mailbox),
                       &ValidPayload);
 
   TestPayload received = {};
@@ -131,7 +164,8 @@ void test_invalid_payload_is_rejected()
   TEST_ASSERT(page.Region().Write(MakePayload(0xDEADBEEFU, 7)) == 1);
 
   FakePort port;
-  TestChannel channel(page, LibXR::Doorbell{&FakeWait, &FakeSignal, &FakeReply, &port},
+  FakeMailbox mailbox(port);
+  TestChannel channel(page, MakeFakeMailbox(mailbox),
                       &ValidPayload);
 
   TestPayload received = {};
@@ -151,7 +185,8 @@ void test_unformatted_page_is_rejected()
   TestPage page(g_cold_storage.data(), LibXR::NoCoherence{});
 
   FakePort port;
-  TestChannel channel(page, LibXR::Doorbell{&FakeWait, &FakeSignal, &FakeReply, &port},
+  FakeMailbox mailbox(port);
+  TestChannel channel(page, MakeFakeMailbox(mailbox),
                       &ValidPayload);
 
   TestPayload received = {};
@@ -171,7 +206,8 @@ void test_repeated_notification_replays_reply()
   TEST_ASSERT(page.Region().Write(MakePayload(VALID_MAGIC, 9)) == 1);
 
   FakePort port;
-  TestChannel channel(page, LibXR::Doorbell{&FakeWait, &FakeSignal, &FakeReply, &port},
+  FakeMailbox mailbox(port);
+  TestChannel channel(page, MakeFakeMailbox(mailbox),
                       &ValidPayload);
 
   TestPayload received = {};
@@ -211,7 +247,8 @@ void test_no_notification_never_replies()
 
   FakePort port;
   port.wait_result = LibXR::ErrorCode::TIMEOUT;
-  TestChannel channel(page, LibXR::Doorbell{&FakeWait, &FakeSignal, &FakeReply, &port},
+  FakeMailbox mailbox(port);
+  TestChannel channel(page, MakeFakeMailbox(mailbox),
                       &ValidPayload);
 
   TestPayload received = {};
@@ -232,7 +269,8 @@ void test_null_arguments()
   page.Format();
 
   FakePort port;
-  TestChannel channel(page, LibXR::Doorbell{&FakeWait, &FakeSignal, &FakeReply, &port},
+  FakeMailbox mailbox(port);
+  TestChannel channel(page, MakeFakeMailbox(mailbox),
                       &ValidPayload);
 
   TestPayload received = {};
@@ -243,7 +281,7 @@ void test_null_arguments()
   TEST_ASSERT(port.signals == 0);
 
   TestChannel unbound(
-      TestPage(), LibXR::Doorbell{&FakeWait, &FakeSignal, &FakeReply, &port},
+      TestPage(), MakeFakeMailbox(mailbox),
       &ValidPayload);
   TEST_ASSERT(unbound.Wait(0, &received, &seq) == LibXR::ErrorCode::PTR_NULL);
   TEST_ASSERT(port.waits == 0);

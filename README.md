@@ -21,20 +21,22 @@ shared_page.hpp / .cpp        页协议 + typed 视图：SharedPage<F, T, P, TAG
                                访问窗口 AccessWindow<Provider> 静态调用它。平台中立，两端同用
 shared_page_impl.hpp          私有实现头：模板化的页引擎，shared_page.cpp 为内置 provider 显式
                                实例化；自定义 provider 的消费方 include 它来实例化自己那份
-doorbell.hpp                  响铃接缝（header-only）：Doorbell = Wait（等通知，OK 即有
-                               在途请求）+ Signal（无载荷叫醒对端）+ Reply（回答刚那条），
-                               全是注入的函数指针，平台中立
+mailbox.hpp                   核间通知外设 seam（header-only）：Mailbox 控制器 +
+                               Mailbox::Channel = Wait/Signal/Reply/SetEnabled/
+                               RegisterCallback，全是注入的函数指针，平台中立
 channel table                 页布局的一部分（`ChannelTable<CAPACITY>` / `NameService`）：
                               名字 → 端点的通告与发现，代次语义，维护由页绑定的 provider 负责
-command_channel.hpp           命令方向（header-only）：Doorbell（通知+回执，注入）
+command_channel.hpp           命令方向（header-only）：Mailbox::Channel（通知+回执，注入）
                                + CommandChannel<F, T, P, TAG, Policy>：等、读、校验、去重、回执
-linux_mapping.hpp             Linux 绑定：UioMapping（按 sysfs 名找 /dev/uioN；
+linux_mapping.hpp             Linux 绑定：UIOMapping（按 sysfs 名找 /dev/uioN；
                                `OpenNamed()` 再按 `maps/mapN/name` 选段、字节数取
                                `size`）+ 该映射的一致性域（pgprot_noncached →
                                NoCoherence）。由 `bsp-guidance-vision` 消费，中立核心
                                不引用它
+linux_cmdqu.hpp               Linux cmdqu 绑定：CmdquMailbox 实现 Mailbox 通道，
+                               私有持有 WAIT_EVENT/SEND_WAIT 与 /dev/cvi-rtos-cmdqu
 CMakeLists.txt                STATIC target shared_page_xr，只编 shared_page.cpp，链接 libxr；
-                               doorbell / command_channel / linux_mapping 是 header-only，
+                               mailbox / command_channel / linux_mapping / linux_cmdqu 是 header-only，
                                不触平台 UAPI，任何平台可编译
 ```
 
@@ -263,9 +265,8 @@ ctest --test-dir build --output-on-failure
 invalidate、读路径不请求 clean、样本先于 `head` 发布、payload 先于 `seq` 发布、破 claim
 先同步再推回、格式化是整页范围、通道表通告 EXCHANGE / 查找 READ。它不需要板子，因为
 维护动作现在是注入的 provider。
-`test_doorbell.cpp`：三个动词各走各的指针——`Wait` 原样传超时、`Signal` 不回执、
-`Reply` 不响铃、拷贝后仍指向同一实现。
-`test_command_channel.cpp`：通知侧是假的 `Doorbell`，逐条摆出“有通知/没通知/重复
+`test_mailbox.cpp`：五个动词各走各的指针、`Wait` 报告通道号、没有的能力是空操作。
+`test_command_channel.cpp`：通知侧是假的 `Mailbox::Channel`，逐条摆出“有通知/没通知/重复
 通知”，钉住：无效载荷与未格式化页回执拒绝、重复通知只重发上次回执、`Ack` 之前不发
 回执、空参数不消耗通知、通道自己从不 `Signal()`。
 

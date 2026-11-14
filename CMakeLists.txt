@@ -19,10 +19,10 @@ endif()
 #
 # 平台绑定全部 header-only，且不接触任何平台 UAPI：`linux_mapping.hpp`（UIO 映射与
 # 它的 NC 一致性域）只有 Linux 消费者显式 include 时才进入编译；中立的页引擎与
-# `doorbell.hpp` / `command_channel.hpp` 在任何平台都能编。
+# `mailbox.hpp` / `command_channel.hpp` 在任何平台都能编。
 # Every platform binding is header-only and touches no platform UAPI: `linux_mapping.hpp`
 # (the UIO mapping and its NC coherency domain) enters compilation only where a Linux
-# consumer includes it, while the neutral page engine plus `doorbell.hpp` /
+# consumer includes it, while the neutral page engine plus `mailbox.hpp` /
 # `command_channel.hpp` compile anywhere.
 if(NOT TARGET shared_page_xr)
   add_library(shared_page_xr STATIC shared_page.cpp)

@@ -31,6 +31,24 @@ inline constexpr uint32_t READ_RETRIES = 8;
 // (measured: store / exchange / fetch_add all SIGSEGV, load and compare-exchange
 // are fine).  So build the store out of a compare-exchange, which only needs
 // `lr.w`/`sc.w`.  Each word has a single writer, so the retry loop terminates.
+#if defined(GUIDANCE_PAGE_STORE_AMO) && GUIDANCE_PAGE_STORE_AMO
+// 小核这边用 AMO：它的页是 cacheable+shareable（`ATTR_PMA = C|SH`），而大核每秒
+// 读它二十次。LR/SC 的预留会被对端读掉，重试循环就可能永远不收敛；`Signal()` 和
+// `WriteSample()` 又都在关中断的临界区里，一旦卡住小核就再也不动，整板表现为
+// “remoteproc 注入后挂死”。AMO 在内存系统里原子完成，没有预留可丢。
+// The little core keeps AMO: its page is cacheable+shareable (`ATTR_PMA = C|SH`)
+// and the big core reads it ~20 times a second.  A peer read drops the LR
+// reservation, so the retry loop need never converge; `Signal()` and
+// `WriteSample()` run inside a critical section, so one stuck retry stops the
+// core for good -- which is what "the board hangs after the remoteproc
+// injection" looks like.  AMO completes atomically in the memory system and
+// has no reservation to lose.
+inline void Store(std::atomic<uint32_t>* target, uint32_t value,
+                  std::memory_order order)
+{
+  target->store(value, order);
+}
+#else
 inline void Store(std::atomic<uint32_t>* target, uint32_t value,
                   std::memory_order order)
 {
@@ -40,6 +58,7 @@ inline void Store(std::atomic<uint32_t>* target, uint32_t value,
   {
   }
 }
+#endif
 
 // 逐字拷贝：跨核页面上的字段没有普通读写可言，每 4B 都是一次 volatile 访存——volatile
 // 挡住编译器的撕裂与重排，而 store 侧不能是 atomic store（见上面的 `Store`）。读者用

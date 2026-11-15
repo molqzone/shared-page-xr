@@ -32,6 +32,27 @@ inline constexpr uint32_t READ_RETRIES = 8;
 // are fine).  So build the store out of a compare-exchange, which only needs
 // `lr.w`/`sc.w`.  Each word has a single writer, so the retry loop terminates.
 #if defined(GUIDANCE_PAGE_STORE_AMO) && GUIDANCE_PAGE_STORE_AMO
+/// @brief 认领一个槽位：AMO 交换，没有预留可丢。/ Claim a slot with an AMO swap.
+/// @note 小核上 `compare_exchange` 同样依赖 LR/SC，对端读会丢掉预留，认领可能永远
+///       拿不到（表现为“前两条之后不再更新”）。大核的 uio 页只能走 CAS。
+///       On the little core `compare_exchange` needs LR/SC too, and a peer read
+///       drops the reservation, so the claim may never be taken -- which reads as
+///       "nothing updates after the first two samples".  The big core's uio page
+///       only has CAS.
+inline bool Claim(std::atomic<uint32_t>* state, std::memory_order order)
+{
+  return state->exchange(1u, order) == 0u;
+}
+#else
+inline bool Claim(std::atomic<uint32_t>* state, std::memory_order order)
+{
+  uint32_t expected = 0;
+  return state->compare_exchange_strong(expected, 1u, order,
+                                        std::memory_order_relaxed);
+}
+#endif
+
+#if defined(GUIDANCE_PAGE_STORE_AMO) && GUIDANCE_PAGE_STORE_AMO
 // 小核这边用 AMO：它的页是 cacheable+shareable（`ATTR_PMA = C|SH`），而大核每秒
 // 读它二十次。LR/SC 的预留会被对端读掉，重试循环就可能永远不收敛；`Signal()` 和
 // `WriteSample()` 又都在关中断的临界区里，一旦卡住小核就再也不动，整板表现为
@@ -117,9 +138,7 @@ uint32_t TelemetryCore<Provider>::Write(const void* sample)
   // cleared claim pushed back together on exit.
   AccessWindow<Provider> counters(provider_, head_, 2 * sizeof(uint32_t), AccessIntent::EXCHANGE);
 
-  uint32_t expected = 0;
-  if (!state_->compare_exchange_strong(expected, 1, std::memory_order_acquire,
-                                       std::memory_order_relaxed))
+  if (!Claim(state_, std::memory_order_acquire))
   {
     return 0;
   }
@@ -365,9 +384,7 @@ uint32_t ReferenceCore<Provider>::Write(const void* payload)
   // on exit.
   AccessWindow<Provider> counters(provider_, state_, 2 * sizeof(uint32_t),
                         AccessIntent::EXCHANGE);
-  uint32_t expected = 0;
-  if (!state_->compare_exchange_strong(expected, 1, std::memory_order_acquire,
-                                       std::memory_order_relaxed))
+  if (!Claim(state_, std::memory_order_acquire))
   {
     return 0;
   }
@@ -567,15 +584,11 @@ void PageCore<Provider>::ClearHistory()
   AccessWindow<Provider> region_counters(provider_, region_state, 2 * sizeof(uint32_t),
                                AccessIntent::EXCHANGE);
 
-  uint32_t expected = 0;
-  if (!telemetry_state->compare_exchange_strong(expected, 1, std::memory_order_acquire,
-                                                std::memory_order_relaxed))
+  if (!Claim(telemetry_state, std::memory_order_acquire))
   {
     return;
   }
-  expected = 0;
-  if (!region_state->compare_exchange_strong(expected, 1, std::memory_order_acquire,
-                                             std::memory_order_relaxed))
+  if (!Claim(region_state, std::memory_order_acquire))
   {
     detail::Store(telemetry_state, 0, std::memory_order_release);
     return;

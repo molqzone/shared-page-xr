@@ -20,24 +20,45 @@ namespace detail
 {
 inline constexpr uint32_t READ_RETRIES = 8;
 
-// 逐字拷贝：跨核页面上的字段没有普通读写可言，每 4B 都是一次 atomic_ref 操作。两侧都
-// 走 atomic_ref：页面一侧是必须的原子访存，普通缓冲一侧由 atomic_ref 退化为普通访存。
+// 页上的写不能用 AMO。SG2002 把 uio 的共享页映射成只支持 LR/SC 的访存区间：
+// `amoswap.w`/`amoadd.w` 直接 access fault，而 C++ 的 atomic store 在 RISC-V 上
+// 正好下降成 `amoswap.w`（实测：store / exchange / fetch_add 全部 SIGSEGV，
+// load 与 compare_exchange 正常）。所以这里用 CAS 造一个 store——CAS 只用到
+// `lr.w`/`sc.w`。每个字只有一个写者，重试循环必然收敛。
+// Writes to the page cannot use AMO.  SG2002 maps the uio shared page into an
+// address range that supports LR/SC only: `amoswap.w`/`amoadd.w` take an access
+// fault there, and that is exactly what a C++ atomic store lowers to on RISC-V
+// (measured: store / exchange / fetch_add all SIGSEGV, load and compare-exchange
+// are fine).  So build the store out of a compare-exchange, which only needs
+// `lr.w`/`sc.w`.  Each word has a single writer, so the retry loop terminates.
+inline void Store(std::atomic<uint32_t>* target, uint32_t value,
+                  std::memory_order order)
+{
+  uint32_t expected = target->load(std::memory_order_relaxed);
+  while (!target->compare_exchange_weak(expected, value, order,
+                                        std::memory_order_relaxed))
+  {
+  }
+}
+
+// 逐字拷贝：跨核页面上的字段没有普通读写可言，每 4B 都是一次 volatile 访存——volatile
+// 挡住编译器的撕裂与重排，而 store 侧不能是 atomic store（见上面的 `Store`）。读者用
+// seq/head 的释放存储判定整块有效，逐字的原子性本来就不需要。
 // 字节数必须是 4 的倍数（make_page_layout 保证）。
 // Word-by-word copy: nothing on the cross-core page has plain accesses; every 4B
-// is one atomic_ref operation. Both sides go through atomic_ref -- required on
-// the page side, degenerating to a plain access on ordinary buffers. The byte
-// counts must be multiples of four, which make_page_layout guarantees.
-inline void AtomicCopyWords(void* destination, const void* source, size_t bytes)
+// is one volatile access -- volatile keeps the compiler from tearing or
+// reordering, and the store side must not be an atomic store (see `Store`
+// above).  A reader validates the whole block through the release store of
+// seq/head, so per-word atomicity was never needed.  The byte counts must be
+// multiples of four, which make_page_layout guarantees.
+inline void CopyWords(void* destination, const void* source, size_t bytes)
 {
-  for (size_t offset = 0; offset < bytes; offset += sizeof(uint32_t))
+  auto* to = static_cast<volatile uint32_t*>(destination);
+  const auto* from = static_cast<const volatile uint32_t*>(source);
+  const size_t words = bytes / sizeof(uint32_t);
+  for (size_t index = 0; index < words; ++index)
   {
-    const uint32_t word = std::atomic_ref<const uint32_t>(
-                              *reinterpret_cast<const uint32_t*>(
-                                  static_cast<const uint8_t*>(source) + offset))
-                              .load(std::memory_order_relaxed);
-    std::atomic_ref<uint32_t>(*reinterpret_cast<uint32_t*>(
-                                  static_cast<uint8_t*>(destination) + offset))
-        .store(word, std::memory_order_relaxed);
+    to[index] = from[index];
   }
 }
 }  // namespace detail
@@ -91,10 +112,10 @@ uint32_t TelemetryCore<Provider>::Write(const void* sample)
     // The sample must reach the reader before head advances: the slot window
     // closes (clean) before head is written.
     AccessWindow<Provider> sample_window(provider_, slot, stride_, AccessIntent::WRITE);
-    detail::AtomicCopyWords(slot, sample, stride_);
+    detail::CopyWords(slot, sample, stride_);
   }
-  head_->store(head + 1, std::memory_order_release);
-  state_->store(0, std::memory_order_release);
+  detail::Store(head_, head + 1, std::memory_order_release);
+  detail::Store(state_, 0, std::memory_order_release);
   return head + 1;
 }
 
@@ -137,7 +158,7 @@ bool TelemetryCore<Provider>::Latest(void* out) const
     const uint8_t* slot = ring_ + static_cast<size_t>((head - 1) % slots_) * stride_;
     {
       AccessWindow<Provider> sample_window(provider_, slot, stride_, AccessIntent::READ);
-      detail::AtomicCopyWords(out, slot, stride_);
+      detail::CopyWords(out, slot, stride_);
     }
 
     // 复核 head 之前必须重开一个读窗口（再丢一次过期行）：否则可能读到自己缓存里的
@@ -213,7 +234,7 @@ ErrorCode TelemetryCore<Provider>::Since(uint32_t last_seen, void* out, uint32_t
         const uint8_t* slot =
             ring_ + static_cast<size_t>((head - 1 - index) % slots_) * stride_;
         AccessWindow<Provider> sample_window(provider_, slot, stride_, AccessIntent::READ);
-        detail::AtomicCopyWords(samples + static_cast<size_t>(index) * stride_, slot, stride_);
+        detail::CopyWords(samples + static_cast<size_t>(index) * stride_, slot, stride_);
       }
       for (uint32_t first = 0, last = written == 0 ? 0 : written - 1; first < last;
            ++first, --last)
@@ -289,7 +310,7 @@ ErrorCode ReferenceCore<Provider>::Read(void* out, uint32_t* seq, uint32_t retri
     {
       AccessWindow<Provider> payload_window(provider_, payload_, payload_size_,
                                   AccessIntent::READ);
-      detail::AtomicCopyWords(out, payload_, payload_size_);
+      detail::CopyWords(out, payload_, payload_size_);
     }
 
     // 复核 seq 之前重开读窗口，理由同遥测读路径。
@@ -339,10 +360,10 @@ uint32_t ReferenceCore<Provider>::Write(const void* payload)
     // closes (clean) before seq is written.
     AccessWindow<Provider> payload_window(provider_, payload_, payload_size_,
                                 AccessIntent::WRITE);
-    detail::AtomicCopyWords(payload_, payload, payload_size_);
+    detail::CopyWords(payload_, payload, payload_size_);
   }
-  seq_->store(next, std::memory_order_release);
-  state_->store(0, std::memory_order_release);
+  detail::Store(seq_, next, std::memory_order_release);
+  detail::Store(state_, 0, std::memory_order_release);
   return next;
 }
 
@@ -537,13 +558,13 @@ void PageCore<Provider>::ClearHistory()
   if (!region_state->compare_exchange_strong(expected, 1, std::memory_order_acquire,
                                              std::memory_order_relaxed))
   {
-    telemetry_state->store(0, std::memory_order_release);
+    detail::Store(telemetry_state, 0, std::memory_order_release);
     return;
   }
-  head->store(0, std::memory_order_release);
-  region_seq->store(0, std::memory_order_release);
-  region_state->store(0, std::memory_order_release);
-  telemetry_state->store(0, std::memory_order_release);
+  detail::Store(head, 0, std::memory_order_release);
+  detail::Store(region_seq, 0, std::memory_order_release);
+  detail::Store(region_state, 0, std::memory_order_release);
+  detail::Store(telemetry_state, 0, std::memory_order_release);
 }
 
 template <Coherent Provider>
@@ -568,7 +589,7 @@ void PageCore<Provider>::RecoverStaleClaims()
                                AccessIntent::EXCHANGE);
   AccessWindow<Provider> region_claim(provider_, region_state, sizeof(uint32_t),
                             AccessIntent::EXCHANGE);
-  telemetry_state->store(0, std::memory_order_release);
-  region_state->store(0, std::memory_order_release);
+  detail::Store(telemetry_state, 0, std::memory_order_release);
+  detail::Store(region_state, 0, std::memory_order_release);
 }
 }  // namespace LibXR

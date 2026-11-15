@@ -831,7 +831,7 @@ class PageCore
 };
 
 /** @brief Typed view of the telemetry ring for one sample type. */
-template <PagePod T, Coherent Provider>
+template <PagePod T, Coherent Provider, typename Words = LrScWords>
 class Telemetry
 {
  public:
@@ -886,7 +886,7 @@ class Telemetry
 };
 
 /** @brief Typed view of the region for one payload type. */
-template <PagePod P, Coherent Provider>
+template <PagePod P, Coherent Provider, typename Words = LrScWords>
 class Reference
 {
  public:

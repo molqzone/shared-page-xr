@@ -54,7 +54,7 @@ inline void CopyWords(void* destination, const void* source, size_t bytes)
 }  // namespace detail
 
 template <Coherent Provider, typename Words>
-TelemetryCore<Provider>::TelemetryCore(void* addr, const PageLayout& layout,
+TelemetryCore<Provider, Words>::TelemetryCore(void* addr, const PageLayout& layout,
                              const Provider& provider)
     : provider_(provider)
 {
@@ -74,7 +74,7 @@ TelemetryCore<Provider>::TelemetryCore(void* addr, const PageLayout& layout,
 }
 
 template <Coherent Provider, typename Words>
-uint32_t TelemetryCore<Provider>::Write(const void* sample)
+uint32_t TelemetryCore<Provider, Words>::Write(const void* sample)
 {
   if (sample == nullptr || head_ == nullptr || state_ == nullptr || ring_ == nullptr)
   {
@@ -108,7 +108,7 @@ uint32_t TelemetryCore<Provider>::Write(const void* sample)
 }
 
 template <Coherent Provider, typename Words>
-uint32_t TelemetryCore<Provider>::Head() const
+uint32_t TelemetryCore<Provider, Words>::Head() const
 {
   if (head_ == nullptr)
   {
@@ -119,7 +119,7 @@ uint32_t TelemetryCore<Provider>::Head() const
 }
 
 template <Coherent Provider, typename Words>
-bool TelemetryCore<Provider>::Latest(void* out) const
+bool TelemetryCore<Provider, Words>::Latest(void* out) const
 {
   if (out == nullptr || head_ == nullptr || state_ == nullptr || ring_ == nullptr)
   {
@@ -166,7 +166,7 @@ bool TelemetryCore<Provider>::Latest(void* out) const
 }
 
 template <Coherent Provider, typename Words>
-ErrorCode TelemetryCore<Provider>::Since(uint32_t last_seen, void* out, uint32_t capacity,
+ErrorCode TelemetryCore<Provider, Words>::Since(uint32_t last_seen, void* out, uint32_t capacity,
                                SinceResult* result) const
 {
   if (result == nullptr)
@@ -256,7 +256,7 @@ ErrorCode TelemetryCore<Provider>::Since(uint32_t last_seen, void* out, uint32_t
 }
 
 template <Coherent Provider, typename Words>
-ReferenceCore<Provider>::ReferenceCore(void* addr, const PageLayout& layout,
+ReferenceCore<Provider, Words>::ReferenceCore(void* addr, const PageLayout& layout,
                              const Provider& provider)
     : provider_(provider)
 {
@@ -273,7 +273,7 @@ ReferenceCore<Provider>::ReferenceCore(void* addr, const PageLayout& layout,
 }
 
 template <Coherent Provider, typename Words>
-ErrorCode ReferenceCore<Provider>::Read(void* out, uint32_t* seq, uint32_t retries) const
+ErrorCode ReferenceCore<Provider, Words>::Read(void* out, uint32_t* seq, uint32_t retries) const
 {
   if (out == nullptr || payload_ == nullptr || state_ == nullptr || seq_ == nullptr)
   {
@@ -320,7 +320,7 @@ ErrorCode ReferenceCore<Provider>::Read(void* out, uint32_t* seq, uint32_t retri
 }
 
 template <Coherent Provider, typename Words>
-uint32_t ReferenceCore<Provider>::Write(const void* payload)
+uint32_t ReferenceCore<Provider, Words>::Write(const void* payload)
 {
   if (payload_ == nullptr || state_ == nullptr || seq_ == nullptr || payload == nullptr)
   {
@@ -354,7 +354,7 @@ uint32_t ReferenceCore<Provider>::Write(const void* payload)
 }
 
 template <Coherent Provider, typename Words>
-uint32_t ReferenceCore<Provider>::Seq() const
+uint32_t ReferenceCore<Provider, Words>::Seq() const
 {
   if (seq_ == nullptr)
   {
@@ -365,23 +365,23 @@ uint32_t ReferenceCore<Provider>::Seq() const
 }
 
 template <Coherent Provider, typename Words>
-const void* ReferenceCore<Provider>::Raw() const { return payload_; }
+const void* ReferenceCore<Provider, Words>::Raw() const { return payload_; }
 
 template <Coherent Provider, typename Words>
-PageCore<Provider>::PageCore(void* addr, const PageLayout& layout,
+PageCore<Provider, Words>::PageCore(void* addr, const PageLayout& layout,
                    const Provider& provider)
     : page_(static_cast<uint8_t*>(addr)), layout_(layout), provider_(provider)
 {
 }
 
 template <Coherent Provider, typename Words>
-bool PageCore<Provider>::Valid() const { return page_ != nullptr; }
+bool PageCore<Provider, Words>::Valid() const { return page_ != nullptr; }
 
 template <Coherent Provider, typename Words>
-uint8_t* PageCore<Provider>::Data() const { return page_; }
+uint8_t* PageCore<Provider, Words>::Data() const { return page_; }
 
 template <Coherent Provider, typename Words>
-PageMagicStatus PageCore<Provider>::Check() const
+PageMagicStatus PageCore<Provider, Words>::Check() const
 {
   if (page_ == nullptr)
   {
@@ -428,7 +428,7 @@ PageMagicStatus PageCore<Provider>::Check() const
 }
 
 template <Coherent Provider, typename Words>
-PageMagicStatus PageCore<Provider>::Initialize()
+PageMagicStatus PageCore<Provider, Words>::Initialize()
 {
   const auto status = Check();
 
@@ -446,7 +446,7 @@ PageMagicStatus PageCore<Provider>::Initialize()
 }
 
 template <Coherent Provider, typename Words>
-void PageCore<Provider>::Format()
+void PageCore<Provider, Words>::Format()
 {
   if (page_ == nullptr)
   {
@@ -508,7 +508,7 @@ void PageCore<Provider>::Format()
 }
 
 template <Coherent Provider, typename Words>
-void PageCore<Provider>::ClearHistory()
+void PageCore<Provider, Words>::ClearHistory()
 {
   if (page_ == nullptr)
   {
@@ -550,7 +550,7 @@ void PageCore<Provider>::ClearHistory()
 }
 
 template <Coherent Provider, typename Words>
-void PageCore<Provider>::RecoverStaleClaims()
+void PageCore<Provider, Words>::RecoverStaleClaims()
 {
   if (page_ == nullptr)
   {

@@ -71,3 +71,9 @@ Diagnostics:
       readability-identifier-naming.FunctionCase: lower_case
       readability-identifier-naming.ClassMethodCase: CamelCase
       readability-identifier-naming.MethodCase: CamelCase
+
+---
+If:
+  PathMatch: '(.*/)?linux_(mapping|cmdqu)\.hpp'
+CompileFlags:
+  CompilationDatabase: ../build/clangd-host

@@ -31,56 +31,6 @@ inline constexpr uint32_t READ_RETRIES = 8;
 // (measured: store / exchange / fetch_add all SIGSEGV, load and compare-exchange
 // are fine).  So build the store out of a compare-exchange, which only needs
 // `lr.w`/`sc.w`.  Each word has a single writer, so the retry loop terminates.
-#if defined(GUIDANCE_PAGE_STORE_AMO) && GUIDANCE_PAGE_STORE_AMO
-/// @brief 认领一个槽位：AMO 交换，没有预留可丢。/ Claim a slot with an AMO swap.
-/// @note 小核上 `compare_exchange` 同样依赖 LR/SC，对端读会丢掉预留，认领可能永远
-///       拿不到（表现为“前两条之后不再更新”）。大核的 uio 页只能走 CAS。
-///       On the little core `compare_exchange` needs LR/SC too, and a peer read
-///       drops the reservation, so the claim may never be taken -- which reads as
-///       "nothing updates after the first two samples".  The big core's uio page
-///       only has CAS.
-inline bool Claim(std::atomic<uint32_t>* state, std::memory_order order)
-{
-  return state->exchange(1u, order) == 0u;
-}
-#else
-inline bool Claim(std::atomic<uint32_t>* state, std::memory_order order)
-{
-  uint32_t expected = 0;
-  return state->compare_exchange_strong(expected, 1u, order,
-                                        std::memory_order_relaxed);
-}
-#endif
-
-#if defined(GUIDANCE_PAGE_STORE_AMO) && GUIDANCE_PAGE_STORE_AMO
-// 小核这边用 AMO：它的页是 cacheable+shareable（`ATTR_PMA = C|SH`），而大核每秒
-// 读它二十次。LR/SC 的预留会被对端读掉，重试循环就可能永远不收敛；`Signal()` 和
-// `WriteSample()` 又都在关中断的临界区里，一旦卡住小核就再也不动，整板表现为
-// “remoteproc 注入后挂死”。AMO 在内存系统里原子完成，没有预留可丢。
-// The little core keeps AMO: its page is cacheable+shareable (`ATTR_PMA = C|SH`)
-// and the big core reads it ~20 times a second.  A peer read drops the LR
-// reservation, so the retry loop need never converge; `Signal()` and
-// `WriteSample()` run inside a critical section, so one stuck retry stops the
-// core for good -- which is what "the board hangs after the remoteproc
-// injection" looks like.  AMO completes atomically in the memory system and
-// has no reservation to lose.
-inline void Store(std::atomic<uint32_t>* target, uint32_t value,
-                  std::memory_order order)
-{
-  target->store(value, order);
-}
-#else
-inline void Store(std::atomic<uint32_t>* target, uint32_t value,
-                  std::memory_order order)
-{
-  uint32_t expected = target->load(std::memory_order_relaxed);
-  while (!target->compare_exchange_weak(expected, value, order,
-                                        std::memory_order_relaxed))
-  {
-  }
-}
-#endif
-
 // 逐字拷贝：跨核页面上的字段没有普通读写可言，每 4B 都是一次 volatile 访存——volatile
 // 挡住编译器的撕裂与重排，而 store 侧不能是 atomic store（见上面的 `Store`）。读者用
 // seq/head 的释放存储判定整块有效，逐字的原子性本来就不需要。
@@ -103,7 +53,7 @@ inline void CopyWords(void* destination, const void* source, size_t bytes)
 }
 }  // namespace detail
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 TelemetryCore<Provider>::TelemetryCore(void* addr, const PageLayout& layout,
                              const Provider& provider)
     : provider_(provider)
@@ -123,7 +73,7 @@ TelemetryCore<Provider>::TelemetryCore(void* addr, const PageLayout& layout,
   slots_ = layout.slot_count;
 }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 uint32_t TelemetryCore<Provider>::Write(const void* sample)
 {
   if (sample == nullptr || head_ == nullptr || state_ == nullptr || ring_ == nullptr)
@@ -138,7 +88,7 @@ uint32_t TelemetryCore<Provider>::Write(const void* sample)
   // cleared claim pushed back together on exit.
   AccessWindow<Provider> counters(provider_, head_, 2 * sizeof(uint32_t), AccessIntent::EXCHANGE);
 
-  if (!Claim(state_, std::memory_order_acquire))
+  if (!Words::Claim(state_, std::memory_order_acquire))
   {
     return 0;
   }
@@ -152,12 +102,12 @@ uint32_t TelemetryCore<Provider>::Write(const void* sample)
     AccessWindow<Provider> sample_window(provider_, slot, stride_, AccessIntent::WRITE);
     detail::CopyWords(slot, sample, stride_);
   }
-  detail::Store(head_, head + 1, std::memory_order_release);
-  detail::Store(state_, 0, std::memory_order_release);
+  Words::Store(head_, head + 1, std::memory_order_release);
+  Words::Store(state_, 0, std::memory_order_release);
   return head + 1;
 }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 uint32_t TelemetryCore<Provider>::Head() const
 {
   if (head_ == nullptr)
@@ -168,7 +118,7 @@ uint32_t TelemetryCore<Provider>::Head() const
   return head_->load(std::memory_order_acquire);
 }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 bool TelemetryCore<Provider>::Latest(void* out) const
 {
   if (out == nullptr || head_ == nullptr || state_ == nullptr || ring_ == nullptr)
@@ -215,7 +165,7 @@ bool TelemetryCore<Provider>::Latest(void* out) const
   return false;
 }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 ErrorCode TelemetryCore<Provider>::Since(uint32_t last_seen, void* out, uint32_t capacity,
                                SinceResult* result) const
 {
@@ -305,7 +255,7 @@ ErrorCode TelemetryCore<Provider>::Since(uint32_t last_seen, void* out, uint32_t
   return ErrorCode::BUSY;
 }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 ReferenceCore<Provider>::ReferenceCore(void* addr, const PageLayout& layout,
                              const Provider& provider)
     : provider_(provider)
@@ -322,7 +272,7 @@ ReferenceCore<Provider>::ReferenceCore(void* addr, const PageLayout& layout,
   payload_size_ = layout.payload_size;
 }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 ErrorCode ReferenceCore<Provider>::Read(void* out, uint32_t* seq, uint32_t retries) const
 {
   if (out == nullptr || payload_ == nullptr || state_ == nullptr || seq_ == nullptr)
@@ -369,7 +319,7 @@ ErrorCode ReferenceCore<Provider>::Read(void* out, uint32_t* seq, uint32_t retri
   return ErrorCode::BUSY;
 }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 uint32_t ReferenceCore<Provider>::Write(const void* payload)
 {
   if (payload_ == nullptr || state_ == nullptr || seq_ == nullptr || payload == nullptr)
@@ -384,7 +334,7 @@ uint32_t ReferenceCore<Provider>::Write(const void* payload)
   // on exit.
   AccessWindow<Provider> counters(provider_, state_, 2 * sizeof(uint32_t),
                         AccessIntent::EXCHANGE);
-  if (!Claim(state_, std::memory_order_acquire))
+  if (!Words::Claim(state_, std::memory_order_acquire))
   {
     return 0;
   }
@@ -398,12 +348,12 @@ uint32_t ReferenceCore<Provider>::Write(const void* payload)
                                 AccessIntent::WRITE);
     detail::CopyWords(payload_, payload, payload_size_);
   }
-  detail::Store(seq_, next, std::memory_order_release);
-  detail::Store(state_, 0, std::memory_order_release);
+  Words::Store(seq_, next, std::memory_order_release);
+  Words::Store(state_, 0, std::memory_order_release);
   return next;
 }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 uint32_t ReferenceCore<Provider>::Seq() const
 {
   if (seq_ == nullptr)
@@ -414,23 +364,23 @@ uint32_t ReferenceCore<Provider>::Seq() const
   return seq_->load(std::memory_order_acquire);
 }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 const void* ReferenceCore<Provider>::Raw() const { return payload_; }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 PageCore<Provider>::PageCore(void* addr, const PageLayout& layout,
                    const Provider& provider)
     : page_(static_cast<uint8_t*>(addr)), layout_(layout), provider_(provider)
 {
 }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 bool PageCore<Provider>::Valid() const { return page_ != nullptr; }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 uint8_t* PageCore<Provider>::Data() const { return page_; }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 PageMagicStatus PageCore<Provider>::Check() const
 {
   if (page_ == nullptr)
@@ -477,7 +427,7 @@ PageMagicStatus PageCore<Provider>::Check() const
   return PageMagicStatus::UNFORMATTED;
 }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 PageMagicStatus PageCore<Provider>::Initialize()
 {
   const auto status = Check();
@@ -495,7 +445,7 @@ PageMagicStatus PageCore<Provider>::Initialize()
   return status;
 }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 void PageCore<Provider>::Format()
 {
   if (page_ == nullptr)
@@ -557,7 +507,7 @@ void PageCore<Provider>::Format()
   // the local copy afterwards".
 }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 void PageCore<Provider>::ClearHistory()
 {
   if (page_ == nullptr)
@@ -584,22 +534,22 @@ void PageCore<Provider>::ClearHistory()
   AccessWindow<Provider> region_counters(provider_, region_state, 2 * sizeof(uint32_t),
                                AccessIntent::EXCHANGE);
 
-  if (!Claim(telemetry_state, std::memory_order_acquire))
+  if (!Words::Claim(telemetry_state, std::memory_order_acquire))
   {
     return;
   }
-  if (!Claim(region_state, std::memory_order_acquire))
+  if (!Words::Claim(region_state, std::memory_order_acquire))
   {
-    detail::Store(telemetry_state, 0, std::memory_order_release);
+    Words::Store(telemetry_state, 0, std::memory_order_release);
     return;
   }
-  detail::Store(head, 0, std::memory_order_release);
-  detail::Store(region_seq, 0, std::memory_order_release);
-  detail::Store(region_state, 0, std::memory_order_release);
-  detail::Store(telemetry_state, 0, std::memory_order_release);
+  Words::Store(head, 0, std::memory_order_release);
+  Words::Store(region_seq, 0, std::memory_order_release);
+  Words::Store(region_state, 0, std::memory_order_release);
+  Words::Store(telemetry_state, 0, std::memory_order_release);
 }
 
-template <Coherent Provider>
+template <Coherent Provider, typename Words>
 void PageCore<Provider>::RecoverStaleClaims()
 {
   if (page_ == nullptr)
@@ -621,7 +571,7 @@ void PageCore<Provider>::RecoverStaleClaims()
                                AccessIntent::EXCHANGE);
   AccessWindow<Provider> region_claim(provider_, region_state, sizeof(uint32_t),
                             AccessIntent::EXCHANGE);
-  detail::Store(telemetry_state, 0, std::memory_order_release);
-  detail::Store(region_state, 0, std::memory_order_release);
+  Words::Store(telemetry_state, 0, std::memory_order_release);
+  Words::Store(region_state, 0, std::memory_order_release);
 }
 }  // namespace LibXR

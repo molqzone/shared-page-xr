@@ -441,6 +441,57 @@ struct NoCoherence
   void Sync(void*, size_t) const {}
 };
 
+/** @brief 页上“字”的原子原语：绑定点的另一半答案。
+ *         The word-level atomic primitive: the binding site's other answer.
+ *
+ * `Provider` 回答“谁让这些字节可见”，`Words` 回答“这张映射支持哪种原子操作”。两者
+ * 都是**编译期**的绑定侧决定，因为它们是同一张映射的属性：Linux 的 uio 页只支持
+ * LR/SC（`amoswap.w` 直接 access fault），小核的 cacheable+shareable 页则相反——
+ * 对端的读会丢掉 LR 预留，`compare_exchange` 的循环可能永远不收敛（实测：认领拿不到，
+ * 且 `Store` 的重试困在关中断的临界区里，整板挂死）。库不替任何一侧做决定。
+ * `Provider` answers "who makes these bytes visible"; `Words` answers "which atomic
+ * operations does this mapping support".  Both are compile-time decisions made by the
+ * binding site, because both are properties of one mapping: the Linux uio page supports
+ * LR/SC only (`amoswap.w` takes an access fault), while the little core's
+ * cacheable+shareable page is the other way round -- a peer read drops the LR
+ * reservation, so a `compare_exchange` loop need never converge (measured: the claim
+ * is never taken, and `Store`'s retry sits in an interrupts-off critical section until
+ * the board hangs).  The library does not decide for either side.
+ */
+struct LrScWords
+{
+  static void Store(std::atomic<uint32_t>* target, uint32_t value,
+                    std::memory_order order)
+  {
+    uint32_t expected = target->load(std::memory_order_relaxed);
+    while (!target->compare_exchange_weak(expected, value, order,
+                                          std::memory_order_relaxed))
+    {
+    }
+  }
+
+  static bool Claim(std::atomic<uint32_t>* state, std::memory_order order)
+  {
+    uint32_t expected = 0;
+    return state->compare_exchange_strong(expected, 1u, order,
+                                          std::memory_order_relaxed);
+  }
+};
+
+struct AmoWords
+{
+  static void Store(std::atomic<uint32_t>* target, uint32_t value,
+                    std::memory_order order)
+  {
+    target->store(value, order);
+  }
+
+  static bool Claim(std::atomic<uint32_t>* state, std::memory_order order)
+  {
+    return state->exchange(1u, order) == 0u;
+  }
+};
+
 /** @brief 函数指针桥：平台只给三个自由函数时 / A bridge: the platform hands over three
  *         free functions.
  *
@@ -693,7 +744,7 @@ class NameService
 };
 
 /** @brief Type-erased view of the telemetry ring. Protocol engine, see the .cpp. */
-template <Coherent Provider>
+template <Coherent Provider, typename Words = LrScWords>
 class TelemetryCore
 {
  public:
@@ -717,7 +768,7 @@ class TelemetryCore
 };
 
 /** @brief Type-erased view of the region. Protocol engine, see the .cpp. */
-template <Coherent Provider>
+template <Coherent Provider, typename Words = LrScWords>
 class ReferenceCore
 {
  public:
@@ -739,7 +790,7 @@ class ReferenceCore
 };
 
 /** @brief Type-erased page header operations. Protocol engine, see the .cpp. */
-template <Coherent Provider>
+template <Coherent Provider, typename Words = LrScWords>
 class PageCore
 {
  public:
@@ -831,7 +882,7 @@ class Telemetry
   }
 
  private:
-  TelemetryCore<Provider> core_;
+  TelemetryCore<Provider, Words> core_;
 };
 
 /** @brief Typed view of the region for one payload type. */
@@ -894,7 +945,7 @@ class Reference
   }
 
  private:
-  ReferenceCore<Provider> core_;
+  ReferenceCore<Provider, Words> core_;
 };
 
 /** @brief Typed view of one mapped page and its topic boundary.
@@ -904,7 +955,8 @@ class Reference
  * application-side wire version tag.
  */
 template <PageFormat F, PagePod T, PagePod P, uint32_t TAG = 0,
-          Coherent Provider = FunctionPointerCoherence>
+          Coherent Provider = FunctionPointerCoherence,
+          typename Words = LrScWords>
 class SharedPage : public Topic
 {
  public:
@@ -1015,7 +1067,7 @@ class SharedPage : public Topic
   [[nodiscard]] bool Latest(T* sample) const { return TelemetryReader().Latest(sample); }
 
  private:
-  PageCore<Provider> core_;  ///< Owns the provider; the typed views inherit it from here.
+  PageCore<Provider, Words> core_;  ///< Owns the provider; the typed views inherit it from here.
 };
 
 }  // namespace LibXR

@@ -78,11 +78,12 @@ inline constexpr uint32_t COMMAND_REJECTED = UINT32_MAX;
  * side-effecting command ("turn the LED on") twice.
  */
 template <typename F, PagePod T, PagePod P, uint32_t TAG = 0,
-          Coherent Provider = FunctionPointerCoherence>
+          Coherent Provider = FunctionPointerCoherence,
+          typename Words = LrScWords>
 class CommandChannel
 {
  public:
-  using Page = SharedPage<F, T, P, TAG, Provider>;
+  using Page = SharedPage<F, T, P, TAG, Provider, Words>;
 
   /// @brief 应用侧的载荷校验：magic/类型等，由产品给。
   ///        Application-side payload check (magic, type, ...), supplied by the product.

@@ -673,12 +673,59 @@ void test_channel_table(const Mapping& mapping)
   TEST_ASSERT(!table.Find("abcdefghijklmnopqrstuvwxyz01", &entry));
 }
 
+/// @brief `CheckPageHeader()`：打开一页时的四类拒绝与成功路径。
+///        `CheckPageHeader()`: the four rejections and the success path of an open.
+void test_check_page_header()
+{
+  PageHeader header{};
+  header.magic = PAGE_MAGIC;
+  header.abi_version = 3u;
+  header.page_size = 4096u;
+  header.slot_count = 8u;
+  header.sample_size = 64u;
+  header.payload_size = 24u;
+  header.region_offset = 3904u;
+  header.tag = 7u;
+  PageLayout layout{};
+
+  TEST_ASSERT(CheckPageHeader(header, 4096u, 7u, &layout) == PageOpenStatus::OK);
+  TEST_ASSERT(layout.abi_version == 3u && layout.page_size == 4096u);
+  TEST_ASSERT(layout.slot_count == 8u && layout.sample_size == 64u);
+  TEST_ASSERT(layout.payload_size == 24u && layout.region_offset == 3904u);
+  TEST_ASSERT(layout.tag == 7u);
+  TEST_ASSERT(std::strcmp(OpenName(PageOpenStatus::OK), "OK") == 0);
+
+  // tag 0 表示"这一页还没有产品标签"，不参与比较。
+  TEST_ASSERT(CheckPageHeader(header, 4096u, 0u, &layout) == PageOpenStatus::OK);
+
+  PageHeader cold = header;
+  cold.magic = 0u;
+  TEST_ASSERT(CheckPageHeader(cold, 4096u, 7u, &layout) == PageOpenStatus::COLD_PAGE);
+
+  PageHeader foreign = header;
+  foreign.magic = 0xDEADBEEFU;
+  TEST_ASSERT(CheckPageHeader(foreign, 4096u, 7u, &layout) ==
+              PageOpenStatus::FOREIGN_PAGE);
+
+  TEST_ASSERT(CheckPageHeader(header, 4096u, 9u, &layout) ==
+              PageOpenStatus::TAG_MISMATCH);
+  TEST_ASSERT(CheckPageHeader(header, 8192u, 7u, &layout) ==
+              PageOpenStatus::SIZE_MISMATCH);
+  TEST_ASSERT(CheckPageHeader(header, 4096u, 7u, nullptr) == PageOpenStatus::NO_MAPPING);
+
+  // 拒绝时不写 `layout`，调用方不会读到半份几何。
+  PageLayout untouched{};
+  TEST_ASSERT(CheckPageHeader(foreign, 4096u, 7u, &untouched) != PageOpenStatus::OK);
+  TEST_ASSERT(untouched.page_size == 0u && untouched.tag == 0u);
+}
+
 }  // namespace
 
 int main()
 {
   test_layout();
   test_unbound_page();
+  test_check_page_header();
 
   {
     const Mapping mapping(TestFormat::PAGE_SIZE);

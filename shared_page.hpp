@@ -154,6 +154,45 @@ enum class PageMagicStatus : uint8_t
   return "UNKNOWN";
 }
 
+/** @brief 打开一页并校验页头的结果 / Result of opening a page and checking its header.
+ *
+ * 比 `PageMagicStatus` 多出"打不开"这一档：设备或映射缺失时根本没有页头可读，而
+ * `COLD_PAGE` 是一页真实的、还没有发布者格式化过的内存——bring-up 时这两者要分开报。
+ * Extends `PageMagicStatus` with the "cannot open" case: with no device or mapping there
+ * is no header to read, while `COLD_PAGE` is a real page that no publisher has formatted
+ * yet -- a distinction bring-up needs.
+ */
+enum class PageOpenStatus : uint8_t
+{
+  OK = 0,
+  NO_MAPPING = 1,     ///< uio 设备或按名字的那一段不存在 / No uio device or named map.
+  COLD_PAGE = 2,      ///< magic 为 0：还没有发布者格式化过 / Magic is 0: not formatted.
+  FOREIGN_PAGE = 3,   ///< magic 不是本协议的 / Magic is not this protocol's.
+  TAG_MISMATCH = 4,   ///< 页的 tag 与期望不符 / Page tag differs from the expected one.
+  SIZE_MISMATCH = 5,  ///< page_size 与映射到的字节数不符 / Page size is not this mapping.
+};
+
+/** @brief Name of a page-open status, for logs and CLI output. */
+[[nodiscard]] inline const char* OpenName(PageOpenStatus status)
+{
+  switch (status)
+  {
+    case PageOpenStatus::OK:
+      return "OK";
+    case PageOpenStatus::NO_MAPPING:
+      return "NO_MAPPING";
+    case PageOpenStatus::COLD_PAGE:
+      return "COLD_PAGE";
+    case PageOpenStatus::FOREIGN_PAGE:
+      return "FOREIGN_PAGE";
+    case PageOpenStatus::TAG_MISMATCH:
+      return "TAG_MISMATCH";
+    case PageOpenStatus::SIZE_MISMATCH:
+      return "SIZE_MISMATCH";
+  }
+  return "UNKNOWN";
+}
+
 /** @brief Result data returned by `Telemetry::Since()`. */
 struct SinceResult
 {
@@ -226,6 +265,54 @@ struct PageLayout
   uint32_t header_bytes = 0;
 };
 
+
+/** @brief 校验一页的页头，并把它的几何读进 `layout`。
+ *        Validate a page header and copy the geometry it describes into `layout`.
+ *
+ * 读侧**只信页头**：`layout` 的每个字段都来自这一页，不从编译期常量抄一份，所以校验
+ * 通过就等于"页自称的几何与这份映射一致"。`expect_tag == 0` 表示这一页还没有产品标签，
+ * 跳过 tag 检查。
+ * A reader trusts the header alone: every field of `layout` comes from this page instead
+ * of a compile-time constant, so passing the check means the page's own geometry agrees
+ * with this mapping.  `expect_tag == 0` skips the tag check, for a page that carries no
+ * product tag yet.
+ *
+ * 与页的映射无关（只吃一段页头 + 映射长度），因此能在主机上用假页头测。
+ * Independent of the mapping (it takes a header and a mapped length), so it is testable
+ * on the host with forged headers.
+ */
+[[nodiscard]] inline PageOpenStatus CheckPageHeader(const PageHeader& header,
+                                                    size_t mapped_bytes,
+                                                    uint32_t expect_tag,
+                                                    PageLayout* layout)
+{
+  if (layout == nullptr)
+  {
+    return PageOpenStatus::NO_MAPPING;
+  }
+  if (header.magic != PAGE_MAGIC)
+  {
+    return header.magic == 0u ? PageOpenStatus::COLD_PAGE : PageOpenStatus::FOREIGN_PAGE;
+  }
+  if (expect_tag != 0u && header.tag != expect_tag)
+  {
+    return PageOpenStatus::TAG_MISMATCH;
+  }
+  if (header.page_size != mapped_bytes)
+  {
+    return PageOpenStatus::SIZE_MISMATCH;
+  }
+
+  layout->page_size = header.page_size;
+  layout->slot_count = header.slot_count;
+  layout->sample_size = header.sample_size;
+  layout->payload_size = header.payload_size;
+  layout->region_offset = header.region_offset;
+  layout->tag = header.tag;
+  layout->command_magic = header.command_magic;
+  layout->header_bytes = header.header_bytes;
+  return PageOpenStatus::OK;
+}
 
 /** @brief 页上的一个通道条目 / One announced channel on the page.
  *

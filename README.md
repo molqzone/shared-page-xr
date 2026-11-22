@@ -31,8 +31,9 @@ command_channel.hpp           命令方向（header-only）：Mailbox::Channel�
 linux_mapping.hpp             Linux 绑定：UIOMapping（按 sysfs 名找 /dev/uioN；
                                `OpenNamed()` 再按 `maps/mapN/name` 选段、字节数取
                                `size`）+ 该映射的一致性域（pgprot_noncached →
-                               NoCoherence）。由 `bsp-guidance-vision` 消费，中立核心
-                               不引用它
+                               NoCoherence）+ `OpenPage()`：打开一页，把页头交给中立的
+                               `CheckPageHeader()` 校验并填出 `PageLayout`。
+                               由 `bsp-guidance-vision` 消费，中立核心不引用它
 linux_cmdqu.hpp               Linux cmdqu 绑定：CmdquMailbox 实现 Mailbox 通道，
                                私有持有 WAIT_EVENT/SEND_WAIT 与 /dev/cvi-rtos-cmdqu
 CMakeLists.txt                STATIC target shared_page_xr，只编 shared_page.cpp，链接 libxr；

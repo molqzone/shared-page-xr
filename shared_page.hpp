@@ -83,10 +83,13 @@ struct PageHeader
   uint32_t payload_size;
   uint32_t region_offset;
   uint32_t tag;
+  uint32_t command_magic;
 };
 
-static_assert(sizeof(PageHeader) == 32, "PageHeader layout pinned");
+static_assert(sizeof(PageHeader) == 36, "PageHeader layout pinned");
 static_assert(offsetof(PageHeader, tag) == 28, "PageHeader layout pinned");
+static_assert(offsetof(PageHeader, command_magic) == 32,
+              "the command magic lives in the header's first cache line");
 
 /// @brief Cache-line size the page layout aligns to.
 ///
@@ -107,7 +110,7 @@ inline constexpr size_t align_up(size_t value, size_t align)
 
 /// @brief In-page ring offset (header rounded up to the cache line).
 ///
-/// `PageHeader` is 32 bytes, not a cache-line multiple, so starting the ring at
+/// `PageHeader` is 36 bytes, not a cache-line multiple, so starting the ring at
 /// `sizeof(PageHeader)` leaves the ring's `head`/`write_state` mid-line, sharing
 /// a line with whatever the product places next (a name-service table, say) —
 /// the same false-sharing class that forced the console ring onto its own page.
@@ -215,6 +218,9 @@ struct PageLayout
   uint32_t payload_size = 0;
   uint32_t region_offset = 0;
   uint32_t tag = 0;
+  /// The product format's command word, carried so a transport tool can build a
+  /// command without a side file.  Formats that do not use one leave it zero.
+  uint32_t command_magic = 0;
 };
 
 
@@ -273,6 +279,25 @@ struct ChannelAnnouncement
   uint32_t flags;     ///< `CHANNEL_FLAG_PRESENT` 等。Presence flags.
 };
 
+namespace detail
+{
+/// The format's command word, or zero when the format does not define one.  It is
+/// optional on purpose: the page library must not make every consumer invent a
+/// command vocabulary just to describe a telemetry page.
+template <typename F>
+inline constexpr uint32_t FormatCommandMagic()
+{
+  if constexpr (requires { F::COMMAND_MAGIC; })
+  {
+    return static_cast<uint32_t>(F::COMMAND_MAGIC);
+  }
+  else
+  {
+    return 0u;
+  }
+}
+}  // namespace detail
+
 /** @brief Compute and validate the layout of `SharedPage<F, T, P, TAG>`. */
 template <PageFormat F, PagePod T, PagePod P, uint32_t TAG = 0>
 constexpr PageLayout make_page_layout()
@@ -317,7 +342,8 @@ constexpr PageLayout make_page_layout()
                     static_cast<uint32_t>(sizeof(T)),
                     static_cast<uint32_t>(sizeof(P)),
                     static_cast<uint32_t>(region_offset<F, P>()),
-                    TAG};
+                    TAG,
+                    detail::FormatCommandMagic<F>()};
 }
 
 

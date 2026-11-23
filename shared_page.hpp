@@ -84,12 +84,15 @@ struct PageHeader
   uint32_t region_offset;
   uint32_t tag;
   uint32_t command_magic;
+  uint32_t header_bytes;
 };
 
-static_assert(sizeof(PageHeader) == 36, "PageHeader layout pinned");
+static_assert(sizeof(PageHeader) == 40, "PageHeader layout pinned");
 static_assert(offsetof(PageHeader, tag) == 28, "PageHeader layout pinned");
 static_assert(offsetof(PageHeader, command_magic) == 32,
               "the command magic lives in the header's first cache line");
+static_assert(offsetof(PageHeader, header_bytes) == 36,
+              "the header describes its own length");
 
 /// @brief Cache-line size the page layout aligns to.
 ///
@@ -110,7 +113,7 @@ inline constexpr size_t align_up(size_t value, size_t align)
 
 /// @brief In-page ring offset (header rounded up to the cache line).
 ///
-/// `PageHeader` is 36 bytes, not a cache-line multiple, so starting the ring at
+/// `PageHeader` is 40 bytes, not a cache-line multiple, so starting the ring at
 /// `sizeof(PageHeader)` leaves the ring's `head`/`write_state` mid-line, sharing
 /// a line with whatever the product places next (a name-service table, say) —
 /// the same false-sharing class that forced the console ring onto its own page.
@@ -221,6 +224,9 @@ struct PageLayout
   /// The product format's command word, carried so a transport tool can build a
   /// command without a side file.  Formats that do not use one leave it zero.
   uint32_t command_magic = 0;
+  /// `sizeof(PageHeader)`, so a reader that only knows the magic can still find
+  /// where the ring starts instead of hardcoding this build's header length.
+  uint32_t header_bytes = 0;
 };
 
 
@@ -343,7 +349,8 @@ constexpr PageLayout make_page_layout()
                     static_cast<uint32_t>(sizeof(P)),
                     static_cast<uint32_t>(region_offset<F, P>()),
                     TAG,
-                    detail::FormatCommandMagic<F>()};
+                    detail::FormatCommandMagic<F>(),
+                    static_cast<uint32_t>(sizeof(PageHeader))};
 }
 
 

@@ -406,7 +406,8 @@ PageMagicStatus PageCore<Provider, Words>::Check() const
           header->sample_size == layout_.sample_size &&
           header->payload_size == layout_.payload_size &&
           header->region_offset == layout_.region_offset && header->tag == layout_.tag &&
-          header->command_magic == layout_.command_magic;
+          header->command_magic == layout_.command_magic &&
+          header->header_bytes == layout_.header_bytes;
       return matches ? PageMagicStatus::FORMATTED : PageMagicStatus::MISMATCH;
     }
   }
@@ -480,6 +481,7 @@ void PageCore<Provider, Words>::Format()
   header->region_offset = layout_.region_offset;
   header->tag = layout_.tag;
   header->command_magic = layout_.command_magic;
+  header->header_bytes = layout_.header_bytes;
   header->magic = PAGE_MAGIC;
 
   // 为什么是 WRITE_SYNC 而不是 WRITE：`Format()` 是页上唯一一次"写完马上就会被读回"

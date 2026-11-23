@@ -66,8 +66,8 @@ CMakeLists.txt                STATIC target shared_page_xr，只编 shared_page.
 * **帧/几何**（页多大、多少槽、什么偏移）是**平台数据**：由平台内存图与 ABI 定
   （例如 sophgo-sg200x-debian 的 `memmap.py` 划区域，
   `sg2002_rtos_shm_layout_line` 自描述页头）。编译期以 format traits 注入：库**不带任何
-  SoC 的默认几何**，`PageFormat` concept 只约束 `ABI_VERSION` / `PAGE_SIZE` /
-  `SLOT_COUNT` 三个成员；初始化期由**自描述页头逐项互验**——页头把每个几何数字写在页上，
+  SoC 的默认几何**，`PageFormat` concept 只约束 `PAGE_SIZE` / `SLOT_COUNT`
+  两个成员；初始化期由**自描述页头逐项互验**——页头把每个几何数字写在页上，
   照 `sg2002-ipc` `layout_line` 的做法，`Check()` 逐项比对，任何漂移报 `MISMATCH`，
   绝不静默错读。
 * **载荷**（遥测采样、参考区 payload 的字段）是**应用数据**：以 POD 类型在编译期注入。
@@ -78,7 +78,6 @@ CMakeLists.txt                STATIC target shared_page_xr，只编 shared_page.
 // 产品自己的契约头，双端 include 同一份
 struct Format                                 // 平台几何：本板 4KiB/58 槽，见 guidance_contract.hpp
 {
-  static constexpr uint32_t ABI_VERSION = 1;
   static constexpr size_t PAGE_SIZE = 4096;
   static constexpr uint32_t SLOT_COUNT = 58;
 };
@@ -92,7 +91,7 @@ using Page = LibXR::SharedPage<Format, Sample, Command, WIRE_TAG>;
   （逐字原子拷贝）。字段偏移与语义是**应用的契约**，用应用侧 `static_assert` 钉住。
 * 布局检查在**编译期**：环与区不重叠、计数器紧贴无填充、区落在页尾、槽位 4B 对齐，
   全部由 `make_page_layout<F, T, P, TAG>()` 断言。
-* 双端互验在**初始化期**：页头记录 abi_version/页长/槽位/双端载荷尺寸/区偏移/TAG，
+* 双端互验在**初始化期**：页头记录页长/槽位/双端载荷尺寸/区偏移/TAG/自身长度，
   `Check()` 逐项比对。字段语义变了而尺寸没变时，递增 `TAG`；帧几何变了换 `Format`。
 * `TAG` 是产品侧的 wire 版本号；不传默认 0。
 
@@ -151,7 +150,7 @@ for (;;) {
 
 | 偏移 | 内容 |
 |---|---|
-| `0` | `PageHeader`（自描述）：`magic`、`abi_version`、`page_size`、`slot_count`、`sample_size`、`payload_size`、`region_offset`、`tag` |
+| `0` | `PageHeader`（自描述）：`magic`、`page_size`、`slot_count`、`sample_size`、`payload_size`、`region_offset`、`tag`、`command_magic`、`header_bytes` |
 | `sizeof(PageHeader)` | `TelemetryRing<T, SLOTS>`：`T ring[SLOTS]` + `head` + 写状态 |
 | `channel_offset(layout)` | `ChannelTable<CAPACITY>`：一代通告的头 + `CAPACITY` 个 `ChannelEntry`（名字、CRC32 键、端点、flags） |
 | `PAGE_SIZE - sizeof(Region<P>)` | `Region<P>`：`P payload` + 写状态 + `seq` |

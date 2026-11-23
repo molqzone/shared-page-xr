@@ -400,7 +400,6 @@ PageMagicStatus PageCore<Provider, Words>::Check() const
       // any number that does not match means frame or wire-structure drift between
       // the two ends, and must never be silently misread.
       const bool matches =
-          header->abi_version == layout_.abi_version &&
           header->page_size == layout_.page_size &&
           header->slot_count == layout_.slot_count &&
           header->sample_size == layout_.sample_size &&
@@ -473,7 +472,6 @@ void PageCore<Provider, Words>::Format()
   // ordering lives *inside* one WRITE window: after the single clean a peer sees
   // either an all-zero page or a complete one, never half a page. The readiness
   // gate comes from the window's atomic push-back, not from moving the magic.
-  header->abi_version = layout_.abi_version;
   header->page_size = layout_.page_size;
   header->slot_count = layout_.slot_count;
   header->sample_size = layout_.sample_size;

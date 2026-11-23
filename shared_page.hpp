@@ -57,7 +57,6 @@ namespace LibXR
  */
 template <typename F>
 concept PageFormat = requires {
-  F::ABI_VERSION;
   F::PAGE_SIZE;
   F::SLOT_COUNT;
 };
@@ -76,7 +75,6 @@ inline constexpr uint32_t PAGE_MAGIC = 0x31506461U;  // NOLINT
 struct PageHeader
 {
   uint32_t magic;
-  uint32_t abi_version;
   uint32_t page_size;
   uint32_t slot_count;
   uint32_t sample_size;
@@ -87,11 +85,11 @@ struct PageHeader
   uint32_t header_bytes;
 };
 
-static_assert(sizeof(PageHeader) == 40, "PageHeader layout pinned");
-static_assert(offsetof(PageHeader, tag) == 28, "PageHeader layout pinned");
-static_assert(offsetof(PageHeader, command_magic) == 32,
+static_assert(sizeof(PageHeader) == 36, "PageHeader layout pinned");
+static_assert(offsetof(PageHeader, tag) == 24, "PageHeader layout pinned");
+static_assert(offsetof(PageHeader, command_magic) == 28,
               "the command magic lives in the header's first cache line");
-static_assert(offsetof(PageHeader, header_bytes) == 36,
+static_assert(offsetof(PageHeader, header_bytes) == 32,
               "the header describes its own length");
 
 /// @brief Cache-line size the page layout aligns to.
@@ -113,7 +111,7 @@ inline constexpr size_t align_up(size_t value, size_t align)
 
 /// @brief In-page ring offset (header rounded up to the cache line).
 ///
-/// `PageHeader` is 40 bytes, not a cache-line multiple, so starting the ring at
+/// `PageHeader` is 36 bytes, not a cache-line multiple, so starting the ring at
 /// `sizeof(PageHeader)` leaves the ring's `head`/`write_state` mid-line, sharing
 /// a line with whatever the product places next (a name-service table, say) —
 /// the same false-sharing class that forced the console ring onto its own page.
@@ -214,7 +212,6 @@ inline constexpr size_t region_offset()
  */
 struct PageLayout
 {
-  uint32_t abi_version = 0;
   uint32_t page_size = 0;
   uint32_t slot_count = 0;
   uint32_t sample_size = 0;
@@ -310,7 +307,6 @@ constexpr PageLayout make_page_layout()
 {
   using Ring = TelemetryRing<T, F::SLOT_COUNT>;
 
-  static_assert(F::ABI_VERSION >= 1, "the frame must declare an ABI version");
   static_assert(F::PAGE_SIZE >= sizeof(PageHeader), "the page must hold its header");
   static_assert(F::PAGE_SIZE % sizeof(uint32_t) == 0,
                 "the page must stay word-atomic for the in-page copies");
@@ -342,8 +338,7 @@ constexpr PageLayout make_page_layout()
                 "the ring must end on a cache line so head/write_state start their "
                 "own line, isolated from the product area that follows");
 
-  return PageLayout{F::ABI_VERSION,
-                    static_cast<uint32_t>(F::PAGE_SIZE),
+  return PageLayout{static_cast<uint32_t>(F::PAGE_SIZE),
                     F::SLOT_COUNT,
                     static_cast<uint32_t>(sizeof(T)),
                     static_cast<uint32_t>(sizeof(P)),

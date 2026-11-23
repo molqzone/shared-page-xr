@@ -92,7 +92,6 @@ using SmallPage = SharedPage<TestFormat, Sample, SmallPayload, 0, NoCoherence>;
 /// one is declared here as well.
 struct WideFormat
 {
-  static constexpr uint32_t ABI_VERSION = 1;
   static constexpr size_t PAGE_SIZE = 4096;
   static constexpr uint32_t SLOT_COUNT = 64;
 };
@@ -161,7 +160,6 @@ void test_layout()
   // The layout descriptor shares its numbers with the header: the geometry recorded
   // on the page is exactly these numbers.
   const PageLayout layout = TestPage::Layout();
-  TEST_ASSERT(layout.abi_version == TestFormat::ABI_VERSION);
   TEST_ASSERT(layout.page_size == TestFormat::PAGE_SIZE);
   TEST_ASSERT(layout.slot_count == TestFormat::SLOT_COUNT);
   TEST_ASSERT(layout.sample_size == sizeof(Sample));
@@ -230,7 +228,6 @@ void test_cold_page_and_index(const Mapping& mapping)
   const auto* header = reinterpret_cast<const PageHeader*>(mapping.Data());
   const PageLayout layout = TestPage::Layout();
   TEST_ASSERT(header->magic == PAGE_MAGIC);
-  TEST_ASSERT(header->abi_version == layout.abi_version);
   TEST_ASSERT(header->page_size == layout.page_size);
   TEST_ASSERT(header->slot_count == layout.slot_count);
   TEST_ASSERT(header->sample_size == layout.sample_size);
@@ -254,7 +251,6 @@ void test_cold_page_and_index(const Mapping& mapping)
 void test_foreign_page(const Mapping& mapping)
 {
   const PageHeader foreign = {.magic = 0x11223344U,
-                              .abi_version = 1,
                               .page_size = static_cast<uint32_t>(TestFormat::PAGE_SIZE),
                               .slot_count = TestFormat::SLOT_COUNT,
                               .sample_size = sizeof(Sample),
@@ -340,7 +336,6 @@ void test_initialize(const Mapping& mapping)
   // A foreign page: refused too.
   std::memset(mapping.Data(), 0, TestFormat::PAGE_SIZE);
   const PageHeader foreign = {.magic = 0x11223344U,
-                              .abi_version = 1,
                               .page_size = static_cast<uint32_t>(TestFormat::PAGE_SIZE),
                               .slot_count = TestFormat::SLOT_COUNT,
                               .sample_size = sizeof(Sample),

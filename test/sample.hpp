@@ -35,7 +35,6 @@ namespace LibXRTest
  */
 struct Format
 {
-  static constexpr uint32_t ABI_VERSION = 1;
   static constexpr size_t PAGE_SIZE = 2048;
   static constexpr uint32_t SLOT_COUNT = 32;
 };

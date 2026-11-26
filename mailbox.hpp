@@ -278,11 +278,11 @@ inline ErrorCode Mailbox::Channel::Wait(uint32_t timeout_ms) const
 {
   uint32_t channel = 0;
   const ErrorCode result = mailbox_->Wait(timeout_ms, &channel);
-  if (result != ErrorCode::OK || channel != id_)
+  if (result != ErrorCode::OK)
   {
-    return ErrorCode::TIMEOUT;
+    return result;
   }
-  return ErrorCode::OK;
+  return channel == id_ ? ErrorCode::OK : ErrorCode::TIMEOUT;
 }
 
 inline void Mailbox::Channel::Signal() const { mailbox_->Signal(id_); }

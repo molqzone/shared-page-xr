@@ -85,6 +85,40 @@ set_tests_properties(command_channel_contract PROPERTIES TIMEOUT 30)
 # the helpers take a root, so the test builds a fake tree and pins the three facts --
 # device by name, map by name, size from sysfs.  The vision repository hand-wrote this
 # lookup once; when two answers disagree, the wrong one silently reads the console page.
+# `page_view.hpp`：只读页头的运行时布局。与 `SharedPage` 写同一页、读回同一组偏移/
+# 遥测/通道表；命令写入必须能被 `SharedPage::Region()` 读成同一条命令。
+# `page_view.hpp`: runtime layout from the header alone. It builds a page with
+# `SharedPage`, reads back the same offsets/telemetry/channel table, and a written
+# command must read back through `SharedPage::Region()`.
+add_executable(page_view_test test_page_view.cpp)
+target_link_libraries(page_view_test PRIVATE shared_page_xr)
+target_include_directories(page_view_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_compile_options(page_view_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME page_view_contract COMMAND page_view_test)
+set_tests_properties(page_view_contract PROPERTIES TIMEOUT 30)
+
+# `console_page.hpp`：描述符有效时按公布的偏移读；magic/version/页大小/环越界时
+# `Valid()` 为 false，且 `Read()` 不越界。
+# `console_page.hpp`: follow a valid descriptor; a bad magic/version/page size/ring
+# bound makes `Valid()` false and `Read()` stays in bounds.
+add_executable(console_view_test test_console_view.cpp)
+target_link_libraries(console_view_test PRIVATE shared_page_xr)
+target_include_directories(console_view_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_compile_options(console_view_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME console_view_contract COMMAND console_view_test)
+set_tests_properties(console_view_contract PROPERTIES TIMEOUT 30)
+
+# `linux_cmdqu.hpp`：没有设备时 `Ready()` 为 false、`SendWait()` 为 FAILED，
+# 不写未映射的槽。
+# `linux_cmdqu.hpp`: without a device, `Ready()` is false and `SendWait()` is FAILED,
+# and no unmapped slot is written.
+add_executable(linux_cmdqu_test test_linux_cmdqu.cpp)
+target_link_libraries(linux_cmdqu_test PRIVATE shared_page_xr)
+target_include_directories(linux_cmdqu_test PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+target_compile_options(linux_cmdqu_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME linux_cmdqu_contract COMMAND linux_cmdqu_test)
+set_tests_properties(linux_cmdqu_contract PROPERTIES TIMEOUT 30)
+
 if(UNIX)
   add_executable(linux_mapping_test test_linux_mapping.cpp)
   target_link_libraries(linux_mapping_test PRIVATE shared_page_xr)

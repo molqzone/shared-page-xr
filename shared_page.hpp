@@ -92,6 +92,28 @@ static_assert(offsetof(PageHeader, command_magic) == 28,
 static_assert(offsetof(PageHeader, header_bytes) == 32,
               "the header describes its own length");
 
+/** @brief 命令槽的通用 8B 头 / The generic 8-byte header of a command slot.
+ *
+ * 页头用 `command_magic` 说明“这个页有没有命令槽”；槽的前 8B 固定是 magic/type/seq，
+ * 其余是产品 payload。产品类型（`Guidance::Command`）可以是它的超集，由产品契约在
+ * 编译期钉住偏移；通用的 Linux 工具只认这个头，不需要认识产品类型。
+ *
+ * The page header's `command_magic` says whether the page has a command slot; the first
+ * 8 bytes of the slot are always magic/type/seq and the rest is the product payload.  A
+ * product type (`Guidance::Command`) may be a superset, pinned by the product contract;
+ * the generic Linux tool only knows this header and needs no product type.
+ */
+struct CommandHeader
+{
+  uint32_t magic;
+  uint16_t type;
+  uint16_t seq;
+};
+
+static_assert(sizeof(CommandHeader) == 8, "the command header is 8 bytes");
+static_assert(offsetof(CommandHeader, type) == 4, "CommandHeader::type offset pinned");
+static_assert(offsetof(CommandHeader, seq) == 6, "CommandHeader::seq offset pinned");
+
 /// @brief Cache-line size the page layout aligns to.
 ///
 /// Every independently-maintained structure — the ring together with its
@@ -341,6 +363,24 @@ inline constexpr uint32_t CHANNEL_FLAG_PRESENT = 1u;
 /// @brief 通道表魔数 "NS01"（沿用 rpmsg NS 区时代的记号）。Channel-table magic.
 inline constexpr uint32_t CHANNEL_TABLE_MAGIC = 0x3130534EU;
 
+/** @brief 通道表的表头（与 `CAPACITY` 无关）/ The channel-table header, capacity-free.
+ *
+ * 运行时的通用读者（`cop`）不知道产品声明的 `CAPACITY`，只从页布局算出这段空隙能放
+ * 多少条目；表头就是这 16 字节，条目是紧随其后的 `ChannelEntry` 数组。
+ * A generic runtime reader (`cop`) does not know the product's `CAPACITY`; it derives how
+ * many entries fit in the gap from the page layout.  The header is these 16 bytes and the
+ * entries are the `ChannelEntry` array that follows.
+ */
+struct ChannelTableHeader
+{
+  uint32_t magic;  ///< CHANNEL_TABLE_MAGIC。
+  uint32_t count;  ///< 有效条目数。Live entries.
+  uint32_t gen;    ///< 每次通告递增。Bumped on every announcement.
+  uint32_t reserved;
+};
+
+static_assert(sizeof(ChannelTableHeader) == 16, "the channel-table header is 16 bytes");
+
 /** @brief 页上的通道表：一代通告 + `CAPACITY` 个条目。
  *         The page's channel table: one announced generation plus `CAPACITY` entries.
  *
@@ -359,6 +399,9 @@ struct ChannelTable
   uint32_t reserved;
   ChannelEntry entries[CAPACITY];
 };
+
+static_assert(offsetof(ChannelTable<1>, entries) == sizeof(ChannelTableHeader),
+              "the capacity-free header matches the typed table's prefix");
 
 /** @brief 一条待通告的通道：名字、端点、flags。
  *         One channel to announce: name, endpoint, presence flags. */

@@ -35,3 +35,46 @@ jobs:
 
       - name: test
         run: ctest --test-dir build --output-on-failure
+
+  naming-style:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: fetch LibXR
+        run: git clone --depth 1 https://github.com/jiu-xiao/libxr libxr
+
+      - name: system deps
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev clang-tidy
+
+      - name: configure
+        run: >
+          cmake -S . -B build
+          -DSHARED_PAGE_XR_TEST_BUILD=ON
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: check no kAbc identifiers
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+          pattern = re.compile(r'\bk[A-Z][A-Za-z0-9]+\b')
+          strip_comments = re.compile(r'//.*?$|/\*.*?\*/|"(?:\\.|[^"\\])*"', re.S | re.M)
+          violations = []
+          for p in sorted(pathlib.Path('.').rglob('*')):
+            if p.suffix not in {'.hpp', '.cpp', '.h', '.c'}:
+              continue
+            if any(part in {'libxr', 'build', '.git'} for part in p.parts):
+              continue
+            text = strip_comments.sub(lambda m: '\n' * m.group(0).count('\n'), p.read_text(encoding='utf-8'))
+            for lineno, line in enumerate(text.splitlines(), 1):
+              for m in pattern.finditer(line):
+                violations.append(f'{p}:{lineno}: {m.group(0)}')
+          if violations:
+            print('Forbidden kAbc constant(s) found (use SCREAMING_SNAKE_CASE for compile-time constants and lower_snake_case for local const):', file=sys.stderr)
+            print('\n'.join(violations), file=sys.stderr)
+            sys.exit(1)
+          PY
+
+      - name: check clang-tidy naming rules
+        run: clang-tidy -p build shared_page.cpp test/test_linux_mapping.cpp test/test_mailbox.cpp test/test_command_channel.cpp

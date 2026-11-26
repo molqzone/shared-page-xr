@@ -427,4 +427,41 @@ class UIOMapping
   char path_[64] = {};
 };
 
+/** @brief 打开共享页，并把页头里的几何读进 `layout`。
+ *        Open the shared page and copy the geometry its header describes into `layout`.
+ *
+ * 设备按 `uio_name` 找、段按 `map_name` 找（`maps/mapN/name`），字节数取 sysfs 的
+ * `size`；只有老内核没有 `name`/`size` 属性时才退回"索引 1 + 一个 OS 页"（本平台索引
+ * 0 是 console 页，1 是共享页）。校验由平台中立的 `CheckPageHeader()` 完成，所以这里
+ * 只负责"打开"，页头的语义仍归 `shared_page.hpp`。
+ * The device is found by `uio_name` and the entry by `map_name` (`maps/mapN/name`), with
+ * the length taken from sysfs `size`; only an old kernel without `name`/`size` falls back
+ * to "index 1 plus one OS page" (on this platform index 0 is the console page and 1 the
+ * shared page).  Validation is the platform-neutral `CheckPageHeader()`, so this function
+ * only opens: header semantics stay in `shared_page.hpp`.
+ *
+ * 失败时 `mapping` 可能仍持有映射（`COLD_PAGE` / `FOREIGN_PAGE` / ... 都读到了页），
+ * 调用方可以据此打印诊断；`NO_MAPPING` 时映射是空的。
+ * On failure `mapping` may still hold a mapping (`COLD_PAGE` / `FOREIGN_PAGE` / ... did
+ * read a page) so the caller can log diagnostics; it is empty only for `NO_MAPPING`.
+ */
+[[nodiscard]] inline PageOpenStatus OpenPage(const char* uio_name, const char* map_name,
+                                             uint32_t expect_tag, UIOMapping* mapping,
+                                             PageLayout* layout)
+{
+  if (uio_name == nullptr || map_name == nullptr || mapping == nullptr)
+  {
+    return PageOpenStatus::NO_MAPPING;
+  }
+  const long page = ::sysconf(_SC_PAGESIZE);
+  *mapping = UIOMapping::OpenNamed(uio_name, map_name, 1u,
+                                   page > 0 ? static_cast<size_t>(page) : 0u);
+  if (!*mapping)
+  {
+    return PageOpenStatus::NO_MAPPING;
+  }
+  const auto* header = reinterpret_cast<const PageHeader*>(mapping->Data());
+  return CheckPageHeader(*header, mapping->Size(), expect_tag, layout);
+}
+
 }  // namespace LibXR

@@ -25,12 +25,10 @@ channel table                 页布局的一部分（`ChannelTable<CAPACITY>` /
                               名字 → 端点的通告与发现，代次语义，维护由页绑定的 provider 负责
 command_channel.hpp           命令方向（header-only）：Mailbox::Channel（通知+回执，注入）
                                + CommandChannel<F, T, P, TAG, Policy>：等、读、校验、去重、回执
-linux_mapping.hpp             Linux 绑定：UIOMapping（按 sysfs 名找 /dev/uioN；
-                               `OpenNamed()` 再按 `maps/mapN/name` 选段、字节数取
-                               `size`）+ 该映射的一致性域（pgprot_noncached →
-                               NoCoherence）+ `OpenPage()`：打开一页，把页头交给中立的
-                               `CheckPageHeader()` 校验并填出 `PageLayout`。
-                               由 `bsp-guidance-vision` 消费，中立核心不引用它
+linux_mapping.hpp             Linux 绑定：UIO 设备枚举与 UIOMapping（按 sysfs 名找 /dev/uioN，
+                              `OpenNamed()` 按 `maps/mapN/name` 选段并 RAII 持有 mmap）
+                              + 该映射的一致性域（pgprot_noncached → NoCoherence）。
+                              只负责 OS 映射，不解释页头协议
 linux_cmdqu.hpp               Linux cmdqu 绑定：CmdquMailbox 实现 Mailbox 通道，
                                私有持有 WAIT_EVENT/SEND_WAIT 与 /dev/cvi-rtos-cmdqu
 CMakeLists.txt                STATIC target shared_page_xr，只编 shared_page.cpp，链接 libxr；

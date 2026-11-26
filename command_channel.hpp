@@ -15,7 +15,7 @@
  * 命令、重复的通知要不要重放、失败怎么回执。向上只剩两条调用：
  *
  * ```cpp
- * Guidance::Command command = {};
+ * ProductCommand command = {};
  * uint32_t seq = 0;
  * if (channel.Wait(UINT32_MAX, &command, &seq) == LibXR::ErrorCode::OK) {
  *   channel.Ack(seq, ApplyCommand(command));   // 产品只写这一行业务
@@ -32,7 +32,7 @@
  * answered. Only two calls remain above:
  *
  * ```cpp
- * Guidance::Command command = {};
+ * ProductCommand command = {};
  * uint32_t seq = 0;
  * if (channel.Wait(UINT32_MAX, &command, &seq) == LibXR::ErrorCode::OK) {
  *   channel.Ack(seq, ApplyCommand(command));   // the product writes only this

@@ -3,14 +3,11 @@
 SG2002 大小核（Linux 大核 ↔ C906L RTOS 小核）共享页传输。`SharedPage` 继承 LibXR 的
 `Topic`，模块直接以 Topic 作为边界；宿主侧适配器负责 drain。
 
-本仓库是 `bsp-guidance-action` 的 submodule（与 `libcvimpp` 在 vision 仓里的位置同层，
-做法一致），**不是 xrobot Module**：没有 MANIFEST、不进 `User/xrobot.yaml`、不被
-`xrobot_gen_main` 构造。
+本仓库是产品固件与 Linux 宿主仓库共用的传输层 submodule，**不是 xrobot Module**：
+没有 MANIFEST、不进 `User/xrobot.yaml`、不被 `xrobot_gen_main` 构造。
 
 本仓库的传输语义（页布局、keep-latest、区域快照、claim、一致性接缝）以本 README 为准；
-产品那一层的定稿规格是消费方仓的 `docs/inter-core-protocol.md`（`bsp-guidance-action`），
-wire 类型（`Sample` / `Command` / 帧几何 / 通道表）在它的 `User/guidance_contract.hpp`，
-并由同仓的 `tools/guidance-contract` 发布成机器可读的 `guidance_contract.json`。
+产品层的 wire 类型（`Sample` / `Command` / `Format`）由产品契约仓库自行定义。
 
 ## 组成
 
@@ -106,7 +103,7 @@ Command command = {};
 if (page.Region().Read(&command, &seq) == ErrorCode::OK) { /* 用 command */ }
 
 // 消费侧（Linux / 另一核）：页指针与一致性域都是构造参数
-auto mapping = LibXR::UioMapping::Open("guidance-pages", 1, 4096);  // Linux 绑定
+auto mapping = LibXR::UioMapping::Open("rtos-pages", 1, 4096);  // Linux 绑定
 Page page(mapping.Data(), mapping.Coherence());  // 域由映射给出，必须给
 uint32_t seen = page.TelemetryReader().Head();   // 从当前 head 起，只跟新样本
 LibXR::SinceResult since{};
@@ -129,9 +126,9 @@ for (;;) {
 
 ```cpp
 // C906L 侧：通知与回执由平台绑定实现（这里是 mailbox doorbell），页层不认识它
-Guidance::CommandChannel channel(page, mailbox_port.Port(), Guidance::CommandValid);
+ProductCommandChannel channel(page, mailbox_port.Port(), CommandValid);
 for (;;) {
-  Guidance::Command command = {};
+  ProductCommand command = {};
   uint32_t seq = 0;
   if (channel.Wait(LibXR::WAIT_FOREVER, &command, &seq) != LibXR::ErrorCode::OK) {
     continue;                       // 超时/无效/重复，页层已经按合同回执过

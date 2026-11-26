@@ -41,13 +41,11 @@ namespace LibXR
 {
 /** @brief 平台帧几何必须给出的三个数 / The three numbers a platform geometry provides.
  *
- * 本库**不带任何 SoC 的默认几何**：页多大、多少槽、帧 ABI 第几版都是平台数据，由消费方
- * 在自己的契约头里声明（本板是 `User/guidance_contract.hpp` 的 `Guidance::Format`，
- * 语义见 `docs/inter-core-protocol.md`）。换几何 = 换 traits，语义与 API 不动。
- * This library ships **no SoC's default geometry**: page size, slot count and frame ABI
- * version are platform data, declared by the consumer in its own contract header (on this
- * board `Guidance::Format` in `User/guidance_contract.hpp`, specified by
- * `docs/inter-core-protocol.md`).  A different geometry is a different traits type, with
+ * 本库**不带任何 SoC 的默认几何**：页多大、多少槽都是平台数据，由消费方
+ * 在自己的契约头里声明（例如 `ProductFormat`）。换几何 = 换 traits，语义与 API 不动。
+ * This library ships **no SoC's default geometry**: page size and slot count are
+ * platform data, declared by the consumer in its own contract header (e.g.
+ * `ProductFormat`).  A different geometry is a different traits type, with
  * the semantics and API unchanged.
  *
  * 这条约束写成 concept 而不是注释：漏一个成员时错在声明处，而不是在某个 `static_assert`
@@ -95,12 +93,12 @@ static_assert(offsetof(PageHeader, header_bytes) == 32,
 /** @brief 命令槽的通用 8B 头 / The generic 8-byte header of a command slot.
  *
  * 页头用 `command_magic` 说明“这个页有没有命令槽”；槽的前 8B 固定是 magic/type/seq，
- * 其余是产品 payload。产品类型（`Guidance::Command`）可以是它的超集，由产品契约在
+ * 其余是产品 payload。产品命令类型可以是它的超集，由产品契约在
  * 编译期钉住偏移；通用的 Linux 工具只认这个头，不需要认识产品类型。
  *
  * The page header's `command_magic` says whether the page has a command slot; the first
  * 8 bytes of the slot are always magic/type/seq and the rest is the product payload.  A
- * product type (`Guidance::Command`) may be a superset, pinned by the product contract;
+ * product command type may be a superset, pinned by the product contract;
  * the generic Linux tool only knows this header and needs no product type.
  */
 struct CommandHeader

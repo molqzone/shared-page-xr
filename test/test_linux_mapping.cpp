@@ -68,12 +68,12 @@ struct FakeUio
   }
 };
 
-/// @brief 造出真机形状的树：uio0 是别的设备，uio1 才是 guidance-pages。
+/// @brief 造出真机形状的树：uio0 是别的设备，uio1 才是 rtos-pages。
 ///        Build the shape a real machine has: uio0 is something else, uio1 is ours.
 void BuildMachineTree(FakeUio* tree)
 {
   tree->Write("uio0/name", "some-other-node\n");
-  tree->Write("uio1/name", "guidance-pages\n");
+  tree->Write("uio1/name", "rtos-pages\n");
   tree->Write("uio1/maps/map0/name", "console\n");
   tree->Write("uio1/maps/map0/addr", "0x8ffdb000\n");
   tree->Write("uio1/maps/map0/size", "8192\n");
@@ -89,13 +89,13 @@ void TestDeviceLookup()
 
   // 名字匹配的是 sysfs 的 `name`，不是目录序号：uio1 才是我们的节点。
   // Match on the sysfs `name`, not on the directory number: uio1 is the one.
-  TEST_ASSERT(LibXR::UIO::FindDevice(tree.root.c_str(), "guidance-pages") == "uio1");
+  TEST_ASSERT(LibXR::UIO::FindDevice(tree.root.c_str(), "rtos-pages") == "uio1");
   TEST_ASSERT(LibXR::UIO::FindDevice(tree.root.c_str(), "some-other-node") == "uio0");
   TEST_ASSERT(LibXR::UIO::FindDevice(tree.root.c_str(), "absent").empty());
 
   // 空 root 与空名字都只是"没找到"，不崩、不读别的设备。
   // An empty root or name is just "not found": no crash, no reading another device.
-  TEST_ASSERT(LibXR::UIO::FindDevice(nullptr, "guidance-pages").empty());
+  TEST_ASSERT(LibXR::UIO::FindDevice(nullptr, "rtos-pages").empty());
   TEST_ASSERT(LibXR::UIO::FindDevice(tree.root.c_str(), nullptr).empty());
 }
 
@@ -168,7 +168,7 @@ void TestEnumerate()
   TEST_ASSERT(devices[0].name == "some-other-node");
   TEST_ASSERT(devices[0].maps.empty());
   TEST_ASSERT(devices[1].dir == "uio1");
-  TEST_ASSERT(devices[1].name == "guidance-pages");
+  TEST_ASSERT(devices[1].name == "rtos-pages");
   TEST_ASSERT(devices[1].maps.size() == 2u);
   TEST_ASSERT(devices[1].maps[0].index == 0u);
   TEST_ASSERT(devices[1].maps[0].name == "console");

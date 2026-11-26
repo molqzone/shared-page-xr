@@ -46,12 +46,15 @@
  * without needing root and a wide-open `/dev/mem`.
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -195,6 +198,92 @@ inline bool FindMapByName(const char* root, const char* device, const char* map_
   }
   return false;
 }
+
+/// @brief 一段映射的完整描述：索引、DT 名字、物理地址、字节数。
+///        One map entry's full description: index, DT name, physical address, bytes.
+struct MapEntry
+{
+  uint32_t index = 0;
+  std::string name;
+  uint64_t addr = 0;
+  size_t bytes = 0;
+};
+
+/// @brief 一个 uio 设备：sysfs 目录名、设备名、它的 maps。
+///        One uio device: sysfs dir name, device name, and its maps.
+struct DeviceInfo
+{
+  std::string dir;
+  std::string name;
+  std::vector<MapEntry> maps;
+};
+
+/**
+ * @brief 枚举 root 下的所有 uio 设备与 maps / Enumerate every uio device and map.
+ *
+ * 只读 sysfs，不做 mmap；`cop list` 用它，测试可以给一棵假树。设备按 `uioN` 排序，
+ * maps 按索引排序，输出因此稳定。
+ * Reads sysfs only, no mmap; `cop list` uses it and a test can hand it a fake tree.
+ * Devices are sorted by `uioN` and maps by index, so the output is stable.
+ */
+inline std::vector<DeviceInfo> Enumerate(const char* root)
+{
+  std::vector<DeviceInfo> devices;
+  if (root == nullptr)
+  {
+    return devices;
+  }
+  DIR* directory = ::opendir(root);
+  if (directory == nullptr)
+  {
+    return devices;
+  }
+
+  while (dirent* entry = ::readdir(directory))
+  {
+    if (std::strncmp(entry->d_name, "uio", 3) != 0 || entry->d_name[3] == '\0')
+    {
+      continue;
+    }
+
+    DeviceInfo device;
+    device.dir = entry->d_name;
+    device.name = ReadAttribute(std::string(root) + "/" + device.dir + "/name");
+
+    for (uint32_t index = 0; index < 8; ++index)
+    {
+      const std::string base = std::string(root) + "/" + device.dir + "/maps/map" +
+                               std::to_string(index);
+      const std::string name = ReadAttribute(base + "/name");
+      if (name.empty())
+      {
+        break;
+      }
+
+      MapEntry map;
+      map.index = index;
+      map.name = name;
+      const std::string address = ReadAttribute(base + "/addr");
+      if (!address.empty())
+      {
+        map.addr = std::strtoull(address.c_str(), nullptr, 0);
+      }
+      size_t bytes = 0;
+      (void)ReadMapSize(root, device.dir.c_str(), index, &bytes);
+      map.bytes = bytes;
+      device.maps.push_back(std::move(map));
+    }
+
+    devices.push_back(std::move(device));
+  }
+
+  ::closedir(directory);
+  std::sort(devices.begin(), devices.end(),
+            [](const DeviceInfo& lhs, const DeviceInfo& rhs) {
+              return lhs.dir < rhs.dir;
+            });
+  return devices;
+}
 }  // namespace UIO
 
 /** @brief 一个 uio 映射：按 sysfs 里的 uio 名字找到设备，再映射其中一段。
@@ -217,7 +306,7 @@ class UIOMapping
   /// `OpenNamed()` when one node carries several entries.
   static UIOMapping Open(const char* name, uint32_t map_index, size_t bytes)
   {
-    const std::string device = UIO::FindDevice(kSysfsRoot, name);
+    const std::string device = UIO::FindDevice(SYSFS_ROOT, name);
     if (device.empty() || bytes == 0)
     {
       return {};
@@ -239,17 +328,17 @@ class UIOMapping
   static UIOMapping OpenNamed(const char* name, const char* map_name, uint32_t fallback_index,
                               size_t fallback_bytes)
   {
-    const std::string device = UIO::FindDevice(kSysfsRoot, name);
+    const std::string device = UIO::FindDevice(SYSFS_ROOT, name);
     if (device.empty())
     {
       return {};
     }
     UIO::MapInfo info;
-    if (!UIO::FindMapByName(kSysfsRoot, device.c_str(), map_name, &info))
+    if (!UIO::FindMapByName(SYSFS_ROOT, device.c_str(), map_name, &info))
     {
       info.index = fallback_index;
       size_t bytes = 0;
-      if (UIO::ReadMapSize(kSysfsRoot, device.c_str(), fallback_index, &bytes))
+      if (UIO::ReadMapSize(SYSFS_ROOT, device.c_str(), fallback_index, &bytes))
       {
         info.bytes = bytes;
       }
@@ -269,6 +358,7 @@ class UIOMapping
   /// @brief 映射的 uio 设备节点（诊断用，例如 `/dev/uio0`）。
   ///        The mapped uio node (diagnostics, e.g. `/dev/uio0`).
   [[nodiscard]] const char* DevicePath() const { return path_; }
+  [[nodiscard]] bool Valid() const { return data_ != nullptr; }
   explicit operator bool() const { return data_ != nullptr; }
 
   /// @brief 这个映射的一致性域：non-cacheable，没有对端需要维护。
@@ -287,7 +377,7 @@ class UIOMapping
 
  private:
   /// @brief 真机上的 sysfs 入口 / The sysfs entry point on a real machine.
-  inline static const char* kSysfsRoot = "/sys/class/uio";
+  static constexpr const char* SYSFS_ROOT = "/sys/class/uio";
 
   /// @brief 打开 `/dev/<device>` 并映射第 `map_index` 段。
   ///        Open `/dev/<device>` and map entry `map_index`.
@@ -336,42 +426,5 @@ class UIOMapping
   int fd_ = -1;
   char path_[64] = {};
 };
-
-/** @brief 打开共享页，并把页头里的几何读进 `layout`。
- *        Open the shared page and copy the geometry its header describes into `layout`.
- *
- * 设备按 `uio_name` 找、段按 `map_name` 找（`maps/mapN/name`），字节数取 sysfs 的
- * `size`；只有老内核没有 `name`/`size` 属性时才退回"索引 1 + 一个 OS 页"（本平台索引
- * 0 是 console 页，1 是共享页）。校验由平台中立的 `CheckPageHeader()` 完成，所以这里
- * 只负责"打开"，页头的语义仍归 `shared_page.hpp`。
- * The device is found by `uio_name` and the entry by `map_name` (`maps/mapN/name`), with
- * the length taken from sysfs `size`; only an old kernel without `name`/`size` falls back
- * to "index 1 plus one OS page" (on this platform index 0 is the console page and 1 the
- * shared page).  Validation is the platform-neutral `CheckPageHeader()`, so this function
- * only opens: header semantics stay in `shared_page.hpp`.
- *
- * 失败时 `mapping` 可能仍持有映射（`COLD_PAGE` / `FOREIGN_PAGE` / ... 都读到了页），
- * 调用方可以据此打印诊断；`NO_MAPPING` 时映射是空的。
- * On failure `mapping` may still hold a mapping (`COLD_PAGE` / `FOREIGN_PAGE` / ... did
- * read a page) so the caller can log diagnostics; it is empty only for `NO_MAPPING`.
- */
-[[nodiscard]] inline PageOpenStatus OpenPage(const char* uio_name, const char* map_name,
-                                             uint32_t expect_tag, UIOMapping* mapping,
-                                             PageLayout* layout)
-{
-  if (uio_name == nullptr || map_name == nullptr || mapping == nullptr)
-  {
-    return PageOpenStatus::NO_MAPPING;
-  }
-  const long page = ::sysconf(_SC_PAGESIZE);
-  *mapping = UIOMapping::OpenNamed(uio_name, map_name, 1u,
-                                   page > 0 ? static_cast<size_t>(page) : 0u);
-  if (!*mapping)
-  {
-    return PageOpenStatus::NO_MAPPING;
-  }
-  const auto* header = reinterpret_cast<const PageHeader*>(mapping->Data());
-  return CheckPageHeader(*header, mapping->Size(), expect_tag, layout);
-}
 
 }  // namespace LibXR

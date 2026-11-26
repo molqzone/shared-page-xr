@@ -75,8 +75,10 @@ void BuildMachineTree(FakeUio* tree)
   tree->Write("uio0/name", "some-other-node\n");
   tree->Write("uio1/name", "guidance-pages\n");
   tree->Write("uio1/maps/map0/name", "console\n");
+  tree->Write("uio1/maps/map0/addr", "0x8ffdb000\n");
   tree->Write("uio1/maps/map0/size", "8192\n");
   tree->Write("uio1/maps/map1/name", "shared\n");
+  tree->Write("uio1/maps/map1/addr", "0x8ffdc000\n");
   tree->Write("uio1/maps/map1/size", "4096\n");
 }
 
@@ -155,6 +157,32 @@ void TestOpenRejectsBadInput()
   TEST_ASSERT(!LibXR::UIOMapping::OpenNamed("no-such-uio-device", "shared", 1, 0));
 }
 
+void TestEnumerate()
+{
+  FakeUio tree;
+  BuildMachineTree(&tree);
+
+  const auto devices = LibXR::UIO::Enumerate(tree.root.c_str());
+  TEST_ASSERT(devices.size() == 2u);
+  TEST_ASSERT(devices[0].dir == "uio0");
+  TEST_ASSERT(devices[0].name == "some-other-node");
+  TEST_ASSERT(devices[0].maps.empty());
+  TEST_ASSERT(devices[1].dir == "uio1");
+  TEST_ASSERT(devices[1].name == "guidance-pages");
+  TEST_ASSERT(devices[1].maps.size() == 2u);
+  TEST_ASSERT(devices[1].maps[0].index == 0u);
+  TEST_ASSERT(devices[1].maps[0].name == "console");
+  TEST_ASSERT(devices[1].maps[0].addr == 0x8ffdb000ULL);
+  TEST_ASSERT(devices[1].maps[0].bytes == 8192u);
+  TEST_ASSERT(devices[1].maps[1].index == 1u);
+  TEST_ASSERT(devices[1].maps[1].name == "shared");
+  TEST_ASSERT(devices[1].maps[1].addr == 0x8ffdc000ULL);
+  TEST_ASSERT(devices[1].maps[1].bytes == 4096u);
+
+  TEST_ASSERT(LibXR::UIO::Enumerate(nullptr).empty());
+  TEST_ASSERT(LibXR::UIO::Enumerate("/nonexistent").empty());
+}
+
 }  // namespace
 
 int main()
@@ -163,6 +191,7 @@ int main()
   TestMapSelection();
   TestSizeAndTrim();
   TestOpenRejectsBadInput();
+  TestEnumerate();
   std::printf("linux_mapping: discovery contracts hold\n");
   return 0;
 }

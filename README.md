@@ -72,7 +72,7 @@ CMakeLists.txt                STATIC target shared_page_xr，只编 shared_page.
 
 ```cpp
 // 产品自己的契约头，双端 include 同一份
-struct Format                                 // 平台几何：本板 4KiB/58 槽，见 guidance_contract.hpp
+struct Format                                 // 平台几何：本板 4KiB/58 槽，见 GuidanceContract.hpp
 {
   static constexpr size_t PAGE_SIZE = 4096;
   static constexpr uint32_t SLOT_COUNT = 58;
@@ -248,9 +248,9 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-消费方在自己开启测试时把该选项打开：`bsp-guidance-action` 的 `User/tests` 与
-`tools/guidance-contract` 都是这样的消费方，它们建 libxr、shared-page-xr 与本仓的测试
-目标，然后 `ctest --test-dir /tmp/sg200x-app-tests` 运行契约测试。
+消费方在自己开启测试时把该选项打开：`bsp-guidance-action` 与
+`bsp-guidance-vision` 的测试构建都是这样的消费方，它们建 libxr、shared-page-xr 与本仓
+的测试目标，然后 `ctest` 运行契约测试。
 
 `test_shared_page.cpp`：布局与发布索引——帧几何跟随注入 format、`TelemetryRing`/`Region`
 跟随注入类型的偏移与总长、页头自描述互验与 `MISMATCH`（TAG/载荷尺寸/帧几何漂移）、
@@ -268,6 +268,6 @@ invalidate、读路径不请求 clean、样本先于 `head` 发布、payload 先
 ### 已知待办
 
 `libxr` 尚未作为本仓库的 submodule pin 住（`.gitmodules` 里没有它），所以「单独构建
-本仓库」目前要求旁边已有一份 libxr，或者从 `bsp-guidance-action` 的
-`User/tests` / `tools/guidance-contract` 构建。补上后单独 `git clone
---recursive` 即可自带测试依赖。
+本仓库」目前要求旁边已有一份 libxr，或者从 `bsp-guidance-vision` /
+`bsp-guidance-action` 的测试构建里打开它。补上后单独 `git clone --recursive` 即可自带
+测试依赖。

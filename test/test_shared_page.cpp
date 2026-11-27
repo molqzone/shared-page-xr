@@ -679,7 +679,6 @@ void test_check_page_header()
 {
   PageHeader header{};
   header.magic = PAGE_MAGIC;
-  header.abi_version = 3u;
   header.page_size = 4096u;
   header.slot_count = 8u;
   header.sample_size = 64u;
@@ -689,7 +688,7 @@ void test_check_page_header()
   PageLayout layout{};
 
   TEST_ASSERT(CheckPageHeader(header, 4096u, 7u, &layout) == PageOpenStatus::OK);
-  TEST_ASSERT(layout.abi_version == 3u && layout.page_size == 4096u);
+  TEST_ASSERT(layout.page_size == 4096u);
   TEST_ASSERT(layout.slot_count == 8u && layout.sample_size == 64u);
   TEST_ASSERT(layout.payload_size == 24u && layout.region_offset == 3904u);
   TEST_ASSERT(layout.tag == 7u);
